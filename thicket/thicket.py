@@ -656,7 +656,9 @@ class Thicket(GraphFrame):
                     return
 
         # Add the column to the performance data table
-        self.dataframe = self.dataframe.join(self.metadata[metadata_columns], on=join_key)
+        self.dataframe = self.dataframe.join(
+            self.metadata[metadata_columns], on=join_key
+        )
 
         # Drop column
         if drop:
