@@ -122,7 +122,7 @@ def test_metadata_columns_to_perfdata(
         headers=list(gb.keys()),
     )
     ctk.metadata_columns_to_perfdata(
-        metadata_keys=[(("Base_CUDA", "block_128"), "ProblemSizeRunParam")]
+        metadata_columns=[(("Base_CUDA", "block_128"), "ProblemSizeRunParam")]
     )
     assert (("Base_CUDA", "block_128"), "ProblemSizeRunParam") in ctk.dataframe.columns
     # 2. with metadata_key
@@ -133,7 +133,7 @@ def test_metadata_columns_to_perfdata(
         metadata_key="ProblemSizeRunParam",
     )
     ctk2.metadata_columns_to_perfdata(
-        metadata_keys=[(("Base_CUDA", "block_128"), "user")],
+        metadata_columns=[(("Base_CUDA", "block_128"), "user")],
         join_key="ProblemSizeRunParam",
     )
     assert (("Base_CUDA", "block_128"), "user") in ctk2.dataframe.columns

@@ -618,12 +618,12 @@ class Thicket(GraphFrame):
         )
 
     def metadata_columns_to_perfdata(
-        self, metadata_keys, overwrite=False, drop=False, join_key="profile"
+        self, metadata_columns, overwrite=False, drop=False, join_key="profile"
     ):
         """Add columns from the metadata table to the performance data table. Joins on join_key, an index or column that is present in both tables.
 
         Arguments:
-            metadata_keys (list or str): List of the columns from the metadata table
+            metadata_columns (list or str): List of the columns from the metadata table
             overwrite (bool): Determines overriding behavior in performance data table
             drop (bool): Whether to drop the columns from the metadata table afterwards
             join_key (str): Name of the index/column to join on if not 'profile'
@@ -637,12 +637,12 @@ class Thicket(GraphFrame):
                 f"'{join_key}' must be present (index or columns) for both the performance data table and metadata table."
             )
 
-        # Convert metadata_keys to list if str
-        if isinstance(metadata_keys, str):
-            metadata_keys = [metadata_keys]
+        # Convert metadata_columns to list if str
+        if isinstance(metadata_columns, str):
+            metadata_columns = [metadata_columns]
 
         # Add warning if column already exists in performance data table
-        for mkey in metadata_keys:
+        for mkey in metadata_columns:
             if mkey in self.dataframe.columns:
                 # Drop column to overwrite, otherwise warn and return
                 if overwrite:
@@ -656,11 +656,11 @@ class Thicket(GraphFrame):
                     return
 
         # Add the column to the performance data table
-        self.dataframe = self.dataframe.join(self.metadata[metadata_keys], on=join_key)
+        self.dataframe = self.dataframe.join(self.metadata[metadata_columns], on=join_key)
 
         # Drop column
         if drop:
-            self.metadata.drop(metadata_keys, axis=1, inplace=True)
+            self.metadata.drop(metadata_columns, axis=1, inplace=True)
 
     def squash(self, update_inc_cols=True, new_statsframe=True):
         """Rewrite the Graph to include only nodes present in the performance
