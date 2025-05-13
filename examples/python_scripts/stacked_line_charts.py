@@ -119,7 +119,7 @@ def make_stacked_line_chart(df, chart_type, x_axis, y_axis_metric, **kwargs):
     df.to_csv(kwargs["chart_file_name"] + ".csv")
 
     tdf = df[[(i, value) for i in x_axis]].T
-    tdf.index = [int(re.sub(r"\D", "", str(item))) for item in tdf.index]
+    tdf = tdf.reset_index(level=1, drop=True) # Drop metric name from index
 
     # Hard coded color map
     color = [
@@ -151,11 +151,11 @@ def make_stacked_line_chart(df, chart_type, x_axis, y_axis_metric, **kwargs):
         ax=ax,
     )
 
-    # Set scaling of x-axis
-    if "scaling-factor" in kwargs:
-        ax.set_xscale("log", base=kwargs["scaling-factor"])
-    else:
-        ax.set_xticks(tdf.index)
+    # # Set scaling of x-axis
+    # if "scaling-factor" in kwargs:
+    #     ax.set_xscale("log", base=kwargs["scaling-factor"])
+    # else:
+    #     ax.set_xticks(tdf.index)
 
     # Reverse legend order
     handles, labels = ax.get_legend_handles_labels()
@@ -198,7 +198,7 @@ def process_thickets(
 
     x_axis_dict = {
         "strong": "n_resources",
-        "weak": "n_resources",
+        "weak": ["n_resources","total_problem_size"],
         "throughput": "total_problem_size",
     }
     if not additional_args["x_axis_unique_metadata"]:
@@ -248,9 +248,6 @@ def process_thickets(
     }
     assert len(tk.metadata[constant_dict[scaling]].unique()) == 1
     if not additional_args["chart_title"]:
-        # constant_dict = {
-        #     "strong": tk.metadata["ProblemSizeRunParam"]
-        # }
         additional_args["chart_title"] = (
             f"{app_name}@{version} on {cluster} ({scaling} scaling, constant {tk.metadata[constant_dict[scaling]].iloc[0]} {constant_dict[scaling]})"
         )
