@@ -96,6 +96,11 @@ def arg_parse():
         type=int,
         help="Optional: Font size of the output chart.",
     )
+    parser.add_argument(
+        "--no-mpi",
+        action="store_true",
+        help="Hide MPI regions in the tree."
+    )
     args = parser.parse_args()
     return args
 
@@ -183,9 +188,18 @@ def process_thickets(
 
     tk = th.Thicket.from_caliperreader(glob(input_files + "/**/*.cali", recursive=True))
 
-    f = open(additional_args["chart_file_name"] + ".txt", "w")
-    f.write(tk.tree(metric_column=y_axis_metric))
-    f.close()
+    # Apply query to remove MPI regions from the tree, if any
+    if additional_args["no_mpi"]:
+        query = th.query.Query().match(
+            ".",
+            lambda row: row["name"].apply(
+                lambda n: "MPI_" not in n
+            ).all()
+        )
+        tk = tk.query(query)
+
+    additional_args["tree_str"] = tk.tree(y_axis_metric)
+    print(additional_args["tree_str"])
 
     spec = tk.metadata["benchpark_spec"].iloc[0][0]
     known_scaling_types = ["+strong", "+throughput", "+weak"]
@@ -197,8 +211,8 @@ def process_thickets(
         raise ValueError(f"Unknown scaling type. Must be one of {known_scaling_types}")
 
     x_axis_dict = {
-        "strong": "n_resources",
-        "weak": ["n_resources","total_problem_size"],
+        "strong": ["n_resources", "n_nodes"],
+        "weak": ["n_resources", "n_nodes", "total_problem_size"],
         "throughput": "total_problem_size",
     }
     if not additional_args["x_axis_unique_metadata"]:
@@ -242,14 +256,14 @@ def process_thickets(
             programming_model = keyword.lstrip("+")
 
     constant_dict = {
-        "strong": "total_problem_size",
-        "weak": "process_problem_size",
-        "throughput": "n_resources",
+        "strong": ["total_problem_size"],
+        "weak": ["process_problem_size"],
+        "throughput": ["n_resources", "n_nodes"],
     }
-    assert len(tk.metadata[constant_dict[scaling]].unique()) == 1
+    #assert len(tk.metadata[constant_dict[scaling]].unique()) == 1
     if not additional_args["chart_title"]:
         additional_args["chart_title"] = (
-            f"{app_name}@{version} on {cluster} ({scaling} scaling, constant {tk.metadata[constant_dict[scaling]].iloc[0]} {constant_dict[scaling]})"
+            f"{cluster}/{app_name}@{version} ({scaling} scaling, constant {' '.join([str(tk.metadata[x].iloc[0]) + ' ' + x for x in constant_dict[scaling]])})"
         )
 
     additional_args["chart_file_name"] = (
