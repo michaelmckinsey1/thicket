@@ -62,6 +62,40 @@ Script Arguments:
 Kripke Example Output Charts:
 *****************************
 
+Kripke Calltree
+
+.. code::
+
+   main
+  ├─  Generate
+  │  ├─  MPI_Allreduce
+  │  ├─  MPI_Comm_split
+  │  └─  MPI_Scan
+  ├─  MPI_Allreduce
+  ├─  MPI_Bcast
+  ├─  MPI_Comm_dup
+  ├─  MPI_Comm_free
+  ├─  MPI_Comm_split
+  ├─  MPI_Finalize
+  ├─  MPI_Finalized
+  ├─  MPI_Gather
+  ├─  MPI_Get_library_version
+  ├─  MPI_Initialized
+  └─  Solve
+    └─  solve
+        ├─  LPlusTimes
+        ├─  LTimes
+        ├─  Population
+        │  └─  MPI_Allreduce
+        ├─  Scattering
+        ├─  Source
+        └─  SweepSolver
+          ├─  MPI_Irecv
+          ├─  MPI_Isend
+          ├─  MPI_Testany
+          ├─  MPI_Waitall
+          └─  SweepSubdomain
+
 Strong
 ------
 
@@ -171,5 +205,24 @@ Run canned analysis:
     --top_n_nodes 10
 
 .. figure:: images/kripke_cuda_throughput_time.png
+  :width: 800
+  :align: center
+
+Inclusive Metrics
+-----------------
+
+.. code:: console
+
+  $ python stacked_line_charts.py \
+  --input_files "kripke-strong" \
+  --chart_type "time" \
+  --y_axis_metric "Avg time/rank" \
+  --top_n_nodes 10
+
+We can also visualize any inclusive metrics by selecting them as the ``y_axis_metric``. Here we use ``Avg time/rank`` instead of ``Avg time/rank (exc)``.
+The ``main`` node is automatically removed from the figure, because this information is redundant for the inclusive metric.
+
+
+.. figure:: images/kripke_cuda_strong_time_inc.png
   :width: 800
   :align: center
