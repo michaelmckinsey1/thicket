@@ -165,7 +165,7 @@ def make_stacked_line_chart(df, chart_type, x_axis, y_axis_metric, **kwargs):
     # Reverse legend order
     handles, labels = ax.get_legend_handles_labels()
     ax.legend(
-        list(reversed(handles)), list(reversed(labels)), bbox_to_anchor=(1.1, 1.05)
+        list(reversed(handles)), list(reversed(labels)), bbox_to_anchor=(1, 0.5), loc="center left"
     )
 
     # Try to fix xlabel spacing automatically
@@ -186,7 +186,7 @@ def process_thickets(
     **additional_args,
 ):
 
-    tk = th.Thicket.from_caliperreader(glob(input_files + "/**/*.cali", recursive=True))
+    tk = th.Thicket.from_caliperreader(glob(input_files + "/**/*.cali", recursive=True), disable_tqdm=True)
 
     # Apply query to remove MPI regions from the tree, if any
     if additional_args["no_mpi"]:
@@ -198,7 +198,23 @@ def process_thickets(
         )
         tk = tk.query(query)
 
-    additional_args["tree_str"] = tk.tree(y_axis_metric)
+    # This is to get tree with no metric
+    tk.dataframe["nothing"] = 0
+    additional_args["tree_str"] = tk.tree("nothing", render_header=False, precision=0)
+    # Regular expression to match ANSI escape codes
+    ansi_escape_pattern = re.compile(r'\x1b\[([0-9;]*m)')
+    # Remove ANSI escape codes
+    text_without_ansi = ansi_escape_pattern.sub('', additional_args["tree_str"])
+    # Find and remove everything starting from "Legend"
+    legend_index = text_without_ansi.find("Legend")
+    if legend_index != -1:
+        text_without_ansi = text_without_ansi[:legend_index]
+    text_without_ansi = text_without_ansi.replace("0", "")
+    additional_args["tree_str"] = text_without_ansi
+
+    f = open(additional_args["chart_file_name"] + ".txt", "w")
+    f.write(additional_args["tree_str"])
+    f.close()
     print(additional_args["tree_str"])
 
     spec = tk.metadata["benchpark_spec"].iloc[0][0]
