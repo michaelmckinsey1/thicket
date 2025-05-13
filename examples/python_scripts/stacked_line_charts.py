@@ -97,9 +97,7 @@ def arg_parse():
         help="Optional: Font size of the output chart.",
     )
     parser.add_argument(
-        "--no-mpi",
-        action="store_true",
-        help="Hide MPI regions in the tree."
+        "--no-mpi", action="store_true", help="Hide MPI regions in the tree."
     )
     args = parser.parse_args()
     return args
@@ -124,7 +122,7 @@ def make_stacked_line_chart(df, chart_type, x_axis, y_axis_metric, **kwargs):
     df.to_csv(kwargs["chart_file_name"] + ".csv")
 
     tdf = df[[(i, value) for i in x_axis]].T
-    tdf = tdf.reset_index(level=1, drop=True) # Drop metric name from index
+    tdf = tdf.reset_index(level=1, drop=True)  # Drop metric name from index
 
     # Hard coded color map
     color = [
@@ -155,7 +153,6 @@ def make_stacked_line_chart(df, chart_type, x_axis, y_axis_metric, **kwargs):
         figsize=tuple(kwargs["chart_figsize"]) if kwargs["chart_figsize"] else (10, 5),
         ax=ax,
     )
-
     # # Set scaling of x-axis
     # if "scaling-factor" in kwargs:
     #     ax.set_xscale("log", base=kwargs["scaling-factor"])
@@ -165,7 +162,10 @@ def make_stacked_line_chart(df, chart_type, x_axis, y_axis_metric, **kwargs):
     # Reverse legend order
     handles, labels = ax.get_legend_handles_labels()
     ax.legend(
-        list(reversed(handles)), list(reversed(labels)), bbox_to_anchor=(1, 0.5), loc="center left"
+        list(reversed(handles)),
+        list(reversed(labels)),
+        bbox_to_anchor=(1, 0.5),
+        loc="center left",
     )
 
     # Try to fix xlabel spacing automatically
@@ -177,7 +177,7 @@ def make_stacked_line_chart(df, chart_type, x_axis, y_axis_metric, **kwargs):
     plt.savefig(filename)
 
 
-def process_thickets(
+def prepare_data(
     input_files,
     y_axis_metric,
     filter_nodes_name_prefix,
@@ -186,25 +186,18 @@ def process_thickets(
     **additional_args,
 ):
 
-    tk = th.Thicket.from_caliperreader(glob(input_files + "/**/*.cali", recursive=True), disable_tqdm=True)
-
-    # Apply query to remove MPI regions from the tree, if any
-    if additional_args["no_mpi"]:
-        query = th.query.Query().match(
-            ".",
-            lambda row: row["name"].apply(
-                lambda n: "MPI_" not in n
-            ).all()
-        )
-        tk = tk.query(query)
+    tk = th.Thicket.from_caliperreader(
+        glob(input_files + "/**/*.cali", recursive=True), disable_tqdm=True
+    )
+    tk.update_inclusive_columns()
 
     # This is to get tree with no metric
     tk.dataframe["nothing"] = 0
     additional_args["tree_str"] = tk.tree("nothing", render_header=False, precision=0)
     # Regular expression to match ANSI escape codes
-    ansi_escape_pattern = re.compile(r'\x1b\[([0-9;]*m)')
+    ansi_escape_pattern = re.compile(r"\x1b\[([0-9;]*m)")
     # Remove ANSI escape codes
-    text_without_ansi = ansi_escape_pattern.sub('', additional_args["tree_str"])
+    text_without_ansi = ansi_escape_pattern.sub("", additional_args["tree_str"])
     # Find and remove everything starting from "Legend"
     legend_index = text_without_ansi.find("Legend")
     if legend_index != -1:
@@ -215,7 +208,22 @@ def process_thickets(
     f = open(additional_args["chart_file_name"] + ".txt", "w")
     f.write(additional_args["tree_str"])
     f.close()
-    print(additional_args["tree_str"])
+    print("Full tree:\n"+additional_args["tree_str"]+"\n")
+
+    # Apply query to remove MPI regions from the tree, if any
+    if additional_args["no_mpi"]:
+        query = th.query.Query().match(
+            ".", lambda row: row["name"].apply(lambda n: "MPI_" not in n).all()
+        )
+        tk = tk.query(query)
+    if y_axis_metric in tk.inc_metrics:
+        if len(tk.graph.roots) == 1:
+            root = tk.graph.roots[0].frame["name"]
+            print(f"Automatically removing singular root '{root}' to visualize inclusive metric '{y_axis_metric}' with greater fidelity")
+            query = th.query.Query().match(
+                ".", lambda row: row["name"].apply(lambda n: n != root).all()
+            ).rel("*")
+            tk = tk.query(query)
 
     spec = tk.metadata["benchpark_spec"].iloc[0][0]
     known_scaling_types = ["+strong", "+throughput", "+weak"]
@@ -276,7 +284,7 @@ def process_thickets(
         "weak": ["process_problem_size"],
         "throughput": ["n_resources", "n_nodes"],
     }
-    #assert len(tk.metadata[constant_dict[scaling]].unique()) == 1
+    # assert len(tk.metadata[constant_dict[scaling]].unique()) == 1
     if not additional_args["chart_title"]:
         additional_args["chart_title"] = (
             f"{cluster}/{app_name}@{version} ({scaling} scaling, constant {' '.join([str(tk.metadata[x].iloc[0]) + ' ' + x for x in constant_dict[scaling]])})"
@@ -301,6 +309,7 @@ def process_thickets(
         ctk.dataframe = ctk.dataframe.nlargest(
             top_n_nodes, [(x_axis[0], y_axis_metric)]
         )
+        print("Showing only top 10 nodes")
 
     # Set default label to x_axis_unique_metadata if not provided
     if not additional_args["chart_xlabel"]:
@@ -327,4 +336,4 @@ def process_thickets(
 
 if __name__ == "__main__":
     args = arg_parse()
-    process_thickets(**vars(args))
+    prepare_data(**vars(args))
