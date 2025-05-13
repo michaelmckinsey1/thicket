@@ -27,17 +27,17 @@ def arg_parse():
         help="Directory of Caliper file input, including all subdirectories. Will search for all .cali files.",
     )
     parser.add_argument(
-        "--x_axis_unique_metadata",
-        required=True,
-        type=str,
-        help="Parameter that is varied during the experiment.",
-    )
-    parser.add_argument(
         "--chart_type",
         required=True,
         choices=["percentage_time", "time"],
         type=str,
         help="Specify type of output chart.",
+    )
+    parser.add_argument(
+        "--x_axis_unique_metadata",
+        default=None,
+        type=str,
+        help="Parameter that is varied during the experiment.",
     )
     parser.add_argument(
         "--y_axis_metric",
@@ -110,11 +110,7 @@ def make_stacked_line_chart(df, chart_type, x_axis, y_axis_metric, **kwargs):
         )
     elif chart_type == "time":
         value = y_axis_metric
-        y_label = (
-            kwargs["chart_ylabel"]
-            if kwargs["chart_ylabel"]
-            else y_axis_metric
-        )
+        y_label = kwargs["chart_ylabel"] if kwargs["chart_ylabel"] else y_axis_metric
     else:
         raise ValueError(
             "Invalid chart_type value. Please choose from 'percentage_time' or 'time'."
@@ -178,7 +174,6 @@ def make_stacked_line_chart(df, chart_type, x_axis, y_axis_metric, **kwargs):
 
 def process_thickets(
     input_files,
-    x_axis_unique_metadata,
     y_axis_metric,
     filter_nodes_name_prefix,
     top_n_nodes,
@@ -192,18 +187,25 @@ def process_thickets(
     f.write(tk.tree(metric_column=y_axis_metric))
     f.close()
 
-    # Convert string to iterable
-    if all(isinstance(v, str) for v in tk.metadata[x_axis_unique_metadata]):
-        tk.metadata[x_axis_unique_metadata] = tk.metadata[x_axis_unique_metadata].apply(
-            lambda x: list(map(int, x.strip("{[]}").split(",")))
-        )
-    # Convert iterable to int by multiplying values
-    if all(isinstance(v, Iterable) for v in tk.metadata[x_axis_unique_metadata]):
-        tk.metadata[x_axis_unique_metadata] = tk.metadata[x_axis_unique_metadata].apply(
-            lambda iterable: reduce(lambda x, y: x * y, iterable)
-        )
+    spec = tk.metadata["benchpark_spec"].iloc[0][0]
+    known_scaling_types = ["+strong", "+throughput", "+weak"]
+    scaling = None
+    for keyword in known_scaling_types:
+        if keyword in spec:
+            scaling = keyword.lstrip("+")
+    if not scaling:
+        raise ValueError(f"Unknown scaling type. Must be one of {known_scaling_types}")
 
-    gb = tk.groupby(x_axis_unique_metadata)
+    x_axis_dict = {
+        "strong": "n_resources",
+        "weak": "n_resources",
+        "throughput": "total_problem_size",
+    }
+    if not additional_args["x_axis_unique_metadata"]:
+        # Infer from scaling type
+        additional_args["x_axis_unique_metadata"] = x_axis_dict[scaling]
+
+    gb = tk.groupby(additional_args["x_axis_unique_metadata"])
 
     thickets = list(gb.values())
     x_axis = list(gb.keys())
@@ -234,19 +236,23 @@ def process_thickets(
             f"Expected data for one version, instead got: {list(tk.metadata['version'].unique())}"
         )
 
-    spec = tk.metadata["benchpark_spec"].iloc[0][0]
-    for keyword in ["+strong", "+throughput", "+weak", "+single_node"]:
-        if keyword in spec:
-            scaling = keyword.lstrip("+")
-
     programming_model = "mpi"
     for keyword in ["+cuda", "+rocm", "+openmp"]:
         if keyword in spec:
             programming_model = keyword.lstrip("+")
 
+    constant_dict = {
+        "strong": "total_problem_size",
+        "weak": "process_problem_size",
+        "throughput": "n_resources",
+    }
+    assert len(tk.metadata[constant_dict[scaling]].unique()) == 1
     if not additional_args["chart_title"]:
+        # constant_dict = {
+        #     "strong": tk.metadata["ProblemSizeRunParam"]
+        # }
         additional_args["chart_title"] = (
-            f"{app_name}@{version} on {cluster} ({scaling} scaling)"
+            f"{app_name}@{version} on {cluster} ({scaling} scaling, constant {tk.metadata[constant_dict[scaling]].iloc[0]} {constant_dict[scaling]})"
         )
 
     additional_args["chart_file_name"] = (
@@ -265,11 +271,13 @@ def process_thickets(
         ctk.dataframe = ctk.dataframe.filter(like=filter_nodes_name_prefix, axis=0)
 
     if top_n_nodes != -1:
-        ctk.dataframe = ctk.dataframe.nlargest(top_n_nodes, [(x_axis[0], y_axis_metric)])
+        ctk.dataframe = ctk.dataframe.nlargest(
+            top_n_nodes, [(x_axis[0], y_axis_metric)]
+        )
 
     # Set default label to x_axis_unique_metadata if not provided
     if not additional_args["chart_xlabel"]:
-        additional_args["chart_xlabel"] = x_axis_unique_metadata
+        additional_args["chart_xlabel"] = additional_args["x_axis_unique_metadata"]
 
     if (
         "scaling-factor" in tk.metadata.columns

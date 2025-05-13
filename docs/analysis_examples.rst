@@ -69,10 +69,10 @@ Generate the Strong dataset:
 
 .. code:: console
 
-  $ benchpark experiment init --dest=kripke/cuda/strong kripke+cuda+strong~single_node caliper=time
+  $ benchpark experiment init --dest=kripke/cuda/strong kripke+cuda+strong~single_node caliper=time,mpi
   $ benchpark system init --dest=lassen llnl-sierra
   $ benchpark setup kripke/cuda/strong lassen/ wkp
-  // Follow ramble instructions ...
+  // Follow instructions for running Ramble ...
 
 Run canned analysis:
 
@@ -80,7 +80,6 @@ Run canned analysis:
 
   $ python stacked_line_charts.py \
     --input_files "kripke-strong" \
-    --x_axis_unique_metadata "mpi.world.size" \
     --chart_type "percentage_time" \
     --y_axis_metric "Avg time/rank (exc)" \
     --top_n_nodes 10
@@ -93,7 +92,6 @@ Run canned analysis:
 
    $ python stacked_line_charts.py \
     --input_files "kripke-strong" \
-    --x_axis_unique_metadata "mpi.world.size" \
     --chart_type "time" \
     --y_axis_metric "Avg time/rank (exc)" \
     --top_n_nodes 10
@@ -109,9 +107,9 @@ Generate the Weak dataset:
 
 .. code:: console
 
-  $ benchpark experiment init --dest=kripke/cuda/weak kripke+cuda+weak~single_node caliper=time
+  $ benchpark experiment init --dest=kripke/cuda/weak kripke+cuda+weak~single_node caliper=time,mpi
   $ benchpark setup kripke/cuda/weak lassen/ wkp
-  // Follow ramble instructions ...
+  // Follow instructions for running Ramble ...
 
 Run canned analysis:
 
@@ -119,7 +117,6 @@ Run canned analysis:
 
    $ python stacked_line_charts.py \
     --input_files "kripke-weak" \
-    --x_axis_unique_metadata "mpi.world.size" \
     --chart_type "percentage_time" \
     --y_axis_metric "Avg time/rank (exc)" \
     --top_n_nodes 10
@@ -132,7 +129,6 @@ Run canned analysis:
 
    $ python stacked_line_charts.py \
     --input_files "kripke-weak" \
-    --x_axis_unique_metadata "mpi.world.size" \
     --chart_type "time" \
     --y_axis_metric "Avg time/rank (exc)" \
     --top_n_nodes 10
@@ -148,9 +144,9 @@ Generate the Throughput dataset:
 
 .. code:: console
 
-  $ benchpark experiment init --dest=kripke/cuda/throughput kripke+cuda+throughput~single_node caliper=time
+  $ benchpark experiment init --dest=kripke/cuda/throughput kripke+cuda+throughput~single_node caliper=time,mpi
   $ benchpark setup kripke/cuda/throughput lassen/ wkp
-  // Follow ramble instructions ...
+  // Follow instructions for running Ramble ...
 
 Run canned analysis:
 
@@ -158,7 +154,6 @@ Run canned analysis:
 
    $ python stacked_line_charts.py \
     --input_files "kripke-throughput" \
-    --x_axis_unique_metadata "zones" \
     --chart_type "percentage_time" \
     --y_axis_metric "Avg time/rank (exc)" \
     --top_n_nodes 10
@@ -171,7 +166,6 @@ Run canned analysis:
 
    $ python stacked_line_charts.py \
     --input_files "kripke-throughput" \
-    --x_axis_unique_metadata "zones" \
     --chart_type "time" \
     --y_axis_metric "Avg time/rank (exc)" \
     --top_n_nodes 10
