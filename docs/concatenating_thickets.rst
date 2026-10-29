@@ -4,61 +4,186 @@
 
    SPDX-License-Identifier: MIT
 
-***************************
+.. _concatenating-thickets:
+
+#######################
  Concatenating Thickets
-***************************
+#######################
 
-Thicket does **not** implement any native profile readers (meaning readers that read performance profiles directly into Thicket objects). All readers used in Thicket use Hatchet readers to read each performance profile into a :code:`Hatchet.GraphFrame` (Fig 1B), which is then converted to a :code:`Thicket.Thicket` object containing one profile using the :code:`Thicket.thicketize_graphframe()` function (Fig 1C). The one profile Thickets are then concatenated into a single Thicket object using the :code:`Thicket.concat_thickets()` function (Fig 1D), which is capable of concatenating a set of n Thickets, T:
+This page describes how concatenation combines Thicket graphs, aligns profiles,
+and constructs the result's attributes. It covers row and column concatenation,
+node intersection, and enforced constraints. Use it when modifying concatenation
+or reader code to understand how changes affect node identity, DataFrame indexes,
+and profile mappings.
 
-.. math::
-    T = \{t_1, t_2, ..., t_n\}
+:meth:`Thicket.concat_thickets() <thicket.thicket.Thicket.concat_thickets>`
+accepts a list of ``Thicket`` instances and returns a new ``Thicket`` with a
+unified ``hatchet.Graph`` and concatenated ``pandas.DataFrame`` attributes.
 
-where each :math:`t_i` (:math:`i = 1, 2, ..., n`) has number of profiles :math:`p_i >= 1`.
+.. _concat-example:
+
+.. code-block:: python
+
+   from thicket import Thicket
+
+   # tk_a and tk_b are existing Thicket instances.
+   combined = Thicket.concat_thickets(
+       [tk_a, tk_b], axis="index", calltree="union"
+   )
+
+1. ``axis="index"`` appends rows to ``dataframe`` and ``metadata``.
+2. ``axis="columns"`` aligns profiles and adds a header level to the columns
+   of ``dataframe`` and ``metadata``.
+3. ``calltree="union"`` retains the union graph. ``calltree="intersection"``
+   filters the result using :meth:`~thicket.thicket.Thicket.intersection`.
+
+.. _concat-unify-graphs:
+.. _concat-update-nodes:
+
+*******************
+ Graph Unification
+*******************
+
+``Ensemble._unify()`` performs three operations:
+
+1. Deep-copy the inputs and combine their ``graph`` attributes with successive
+   ``hatchet.Graph.union()`` calls.
+2. Compose the node mappings from those calls into a dictionary from each
+   original ``id(node)`` to its node in the final graph.
+3. Assign the union graph to each copy and replace its ``dataframe`` node index
+   values with the mapped ``hatchet.Node`` instances.
+
+With the default ``node_ordering=False``, ``Graph.union()`` matches nodes by
+frame along matching call paths. All frame attributes participate in the
+comparison. For example, ``main -> foo -> x`` and ``main -> bar -> x`` retain
+separate ``x`` nodes. The result's nodes receive new ``_hatchet_nid`` values.
+
+``Node.__eq__()`` and ``Node.__hash__()`` compare only ``_hatchet_nid``, so nodes
+from different graphs can compare equal. The mapping uses ``id(node)`` to
+distinguish those instances. :func:`~thicket.utils.check_same_frame` verifies
+that each replacement preserves the node's frame.
+
+Node ordering is retained only when all inputs enable it. In Hatchet v2026.2.0,
+ordered unions can produce duplicate children when input traversal orders differ.
+
+.. _concat-merge-tables:
+.. _concat-by-row:
+
+**************************************
+ Row Concatenation (``axis="index"``)
+**************************************
+
+``Ensemble._index()`` concatenates ``dataframe`` and ``metadata`` along their
+row indexes and sorts both results. It also:
+
+1. Extends ``profile`` in input order and merges ``profile_mapping``, sorting
+   the dictionary by profile ID.
+2. Combines ``exc_metrics`` and ``inc_metrics``, removing duplicate metric
+   names without preserving their order.
+3. With ``fill_perfdata=True`` (default), reindexes ``dataframe`` over the
+   Cartesian product of its index levels. Missing combinations receive
+   ``NaN`` in numeric columns and ``None`` in string columns such as ``name``.
+
+``fill_perfdata=False`` retains only existing rows. ``profile`` preserves input
+order even though the DataFrame indexes and ``profile_mapping`` are sorted.
+
+If inputs have different index levels, ``helpers._resolve_missing_indicies()``
+adds each missing level with value ``0`` before graph unification. This modifies
+the original inputs' ``dataframe`` attributes.
+
+.. _concat-by-column:
+
+*******************************************
+ Column Concatenation (``axis="columns"``)
+*******************************************
+
+``Ensemble._columns()`` operates on deep copies and concatenates ``dataframe``
+and ``metadata`` along their columns. Two arguments control alignment:
+
+``headers``
+   One label per input, used as the outer column index level. The default is
+   ``0, 1, ..., len(thickets) - 1``.
+
+``metadata_key``
+   A metadata column, or the existing metadata index name, whose values become
+   the profile index. Rows align on equal values. If omitted, profiles align
+   by position in sorted profile order and receive integer IDs starting at zero.
+
+For example, given CPU and GPU Thickets with a ``size`` metadata column:
+
+.. code-block:: python
+
+   compared = Thicket.concat_thickets(
+       [cpu, gpu],
+       axis="columns",
+       headers=["CPU", "GPU"],
+       metadata_key="size",
+   )
+
+The result has the following attributes:
+
+1. ``dataframe`` is indexed by node and the new profile value. Its columns
+   form a ``pandas.MultiIndex`` with labels such as ``("CPU", "time")`` and
+   ``("GPU", "time")``. Missing input rows produce ``NaN`` values. A single
+   ``("name", "")`` column contains names from the node frames.
+2. ``metadata`` is indexed by the new profile value, with columns grouped by
+   input header. A column used as ``metadata_key`` becomes the index.
+3. ``profile`` and the keys of ``profile_mapping`` contain
+   ``(profile_value, header)`` tuples. The DataFrame indexes contain only
+   ``profile_value`` at the profile level.
+4. ``exc_metrics`` and ``inc_metrics`` contain ``(header, metric)`` tuples.
+
+Without ``metadata_key``, the inputs must have equal profile counts and sorted
+profile indexes. Default profile IDs are hashes of file paths; their sorted
+order does not establish a correspondence between experiments. Use
+``metadata_key`` to align profiles by an experimental parameter.
+
+***********************
+ Aggregated Statistics
+***********************
+
+Both axes create a new ``statsframe`` referencing the result's ``graph`` and
+clear ``statsframe_ops_cache``. ``statsframe.dataframe`` initially contains only
+``name`` (row concatenation) or ``("name", "")`` (column concatenation).
+Statistics computed on the inputs must be recomputed on the result.
+
+.. _concat-intersection:
+
+*******************
+ Node Intersection
+*******************
+
+``calltree="intersection"`` constructs the union first, then calls
+:meth:`~thicket.thicket.Thicket.intersection`. Node selection depends on the axis:
+
+1. After row concatenation, if ``name`` contains null values, a node is retained
+   when none of its ``name`` values is ``None``. Otherwise, its row count must
+   equal ``len(profile)``.
+2. After column concatenation, a node is retained only if all its values across
+   all rows and headers are non-null. This also excludes nodes with missing
+   measurements in the original inputs.
+
+The retained rows are passed through :meth:`~thicket.thicket.Thicket.squash`,
+which rebuilds the graph, renumbers nodes, and recomputes inclusive metrics.
+
+.. _concat-readers:
+
+********************
+ Reader Integration
+********************
+
+For multiple input files, ``Thicket.reader_dispatch()`` reads each file into a
+``hatchet.GraphFrame``, converts it with
+:meth:`~thicket.thicket.Thicket.thicketize_graphframe`, and combines the resulting
+Thickets through pairwise row concatenation. A single file skips concatenation.
+The reader forwards ``fill_perfdata`` and maps ``intersection=True`` to
+``calltree="intersection"``.
 
 .. figure:: images/reading_thickets.png
-    :align: center
+   :align: center
+   :width: 100%
+   :alt: Four Caliper files are read into GraphFrames, converted to Thickets,
+      and combined by two concurrent pairwise concatenations followed by a
+      final concatenation after both complete.
 
-    Figure 1: Example of the Thicket reader process for 4 Caliper profiles.
-
-|
-
-The process of concatenating Thickets requires the unification of some structures like the :code:`Thicket.graph` (calltree), which is explained below.
-
-##################
-Unifying Thickets
-##################
-
-This section mainly refers to the :code:`Thicket.Ensemble._unify()` function.
-
-===================
-Unifying Calltrees
-===================
-
-*Unifying Calltrees* is the process of performing a **graph operation** (e.g. :code:`Hatchet.graph.union()`) on multiple :code:`Thicket.graph`'s. Comparing two graphs involves comparing :code:`Hatchet.Node` objects between the graphs.  The :code:`Hatchet.graph.union()` function computes the union graph between two Hatchet graphs. For the union, nodes are compared by:
-
-1. `Their depth in the tree <https://github.com/LLNL/hatchet/blob/6a6d7027056df96bd1c919ab34a9acce81f3b9a1/hatchet/graph.py#L247>`_ - :code:`Node._depth`.
-2. `Their frame <https://github.com/LLNL/hatchet/blob/6a6d7027056df96bd1c919ab34a9acce81f3b9a1/hatchet/graph.py#L248>`_ ("name" and "type") - :code:`Node.frame._tuple_repr` 
-
-Nodes that match in #1 and #2 are merged in the resulting union graph as a new :code:`Hatchet.Node` object (`deep copy of the first node <https://github.com/LLNL/hatchet/blob/6a6d7027056df96bd1c919ab34a9acce81f3b9a1/hatchet/graph.py#L227>`_). Deep copies of nodes that do **not** match are inserted into the union graph at the appropriate depth.
-
-*Note:* Comparing nodes with the equality operator (:code:`==`) is not sufficient, as the equality operator only compares the :code:`Node._hatchet_nid`, which is not the same as the above comparison.
-
-*Note:* The :code:`Thicket.intersection()` function first applies the :code:`Hatchet.graph.union()` before computing the intersection of the graphs, since their does not exist a :code:`Hatchet.graph.intersection()` function.
-
-======================
-Updating Node Objects
-======================
-
-Because Node objects must be identical between Thicket components (see :ref:`/thicket_properties.rst#nodes`), The resulting new nodes in the union graph must replace the old node objects in components like the :code:`Thicket.dataframe.index` (see `code <https://github.com/LLNL/thicket/blob/develop/thicket/ensemble.py#L68-L83>`_). The :code:`Hatchet.graph.union()` function provides a dictionary mapping old nodes to new nodes, however to avoid applying these updates after every union between two graphs, we `update a dictionary of all the node mappings <https://github.com/LLNL/thicket/blob/develop/thicket/ensemble.py#L53-L67>`_ and apply the updates after all of the unions have been computed. This is **only** necessary when concatenating more than **two** Thickets, as only one union will be performed when concatenating two Thickets. We `apply this idea when reading files <https://github.com/LLNL/thicket/blob/develop/thicket/thicket.py#L393-L413>`_ to avoid this cost.
-
-####################
-Index Concatenation
-####################
-
-*Index Concatenation* refers to the process that happens for the performance and metadata tables. We concatenate the tables, which is essentially "stacking the rows on top of each other". Because we check that the performance profiles we concatenate are unique (:ref:`/thicket_properties.rst#profiles`), we do not need to worry about duplicate indices in either table. We sort the index of both tables, which interleaves the profiles in the MultiIndex of the performance table to visually group all of the profiles in the table for each node. An example of this operation can be seen in the :ref:`/thicket_tutorial.ipynb`, when :code:`axis="columns"`.
-
-#####################
-Column Concatenation
-#####################
-
-*Column Concatenation* refers to the process that happens in the performance, metadata, and statistics tables. We create a MultiIndex out of the columns, such that for each metric, there is a higher level index label. An example of this operation can be seen in the :ref:`/thicket_tutorial.ipynb`, when :code:`axis="columns"`.
+   Reading and concatenating four Caliper profiles with parallel=True.
