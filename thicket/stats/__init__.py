@@ -10,6 +10,7 @@ from .maximum import maximum
 from .mean import mean
 from .median import median
 from .minimum import minimum
+from .sum import sum
 from .percentiles import percentiles
 from .std import std
 from .variance import variance
@@ -21,6 +22,10 @@ from .scoring import score_delta_mean_delta_coefficient_of_variation
 from .scoring import score_bhattacharyya
 from .scoring import score_hellinger
 from .preference import preference
+from .calc_temporal_pattern import calc_temporal_pattern
+from .distance import bhattacharyya_distance
+from .distance import hellinger_distance
+from .confidence_interval import confidence_interval
 
 
 try:

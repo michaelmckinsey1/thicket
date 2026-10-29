@@ -17,14 +17,32 @@ from thicket import Thicket
 from thicket.utils import DuplicateIndexError
 
 
-def test_concat_thickets_index(mpi_scaling_cali):
-    th_27 = Thicket.from_caliperreader(mpi_scaling_cali[0], disable_tqdm=True)
-    th_64 = Thicket.from_caliperreader(mpi_scaling_cali[1], disable_tqdm=True)
+def test_concat_thickets_index(mpi_scaling_cali, intersection, fill_perfdata):
+    th_27 = Thicket.from_caliperreader(
+        mpi_scaling_cali[0],
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
+    th_64 = Thicket.from_caliperreader(
+        mpi_scaling_cali[1],
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
 
-    tk = Thicket.concat_thickets([th_27, th_64], disable_tqdm=True)
-
-    # Check dataframe shape
-    assert tk.dataframe.shape == (90, 7)
+    if intersection:
+        calltree = "intersection"
+    else:
+        calltree = "union"
+    tk = Thicket.concat_thickets(
+        [th_27, th_64],
+        calltree=calltree,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
 
     # Check specific values. Row order can vary so use "sum" to check
     node = tk.dataframe.index.get_level_values("node")[8]
@@ -34,7 +52,13 @@ def test_concat_thickets_index(mpi_scaling_cali):
     with pytest.raises(
         DuplicateIndexError,
     ):
-        Thicket.from_caliperreader([mpi_scaling_cali[0], mpi_scaling_cali[0]])
+        Thicket.from_caliperreader(
+            [mpi_scaling_cali[0], mpi_scaling_cali[0]],
+            node_ordering=False,
+            intersection=intersection,
+            fill_perfdata=fill_perfdata,
+            disable_tqdm=True,
+        )
 
 
 def test_concat_thickets_columns(thicket_axis_columns):
@@ -90,9 +114,9 @@ def test_filter_concat_thickets_columns(thicket_axis_columns):
     filter_multiple_and(combined_th, columns_values)
 
 
-def test_filter_stats_concat_thickets_columns(thicket_axis_columns):
+def test_filter_stats_concat_thickets_columns(thicket_axis_columns, intersection):
     thickets, thickets_cp, combined_th = thicket_axis_columns
-    # columns and corresponding values to filter by
+
     columns_values = {
         ("test", "test_string_column"): ["less than 20"],
         ("test", "test_numeric_column"): [4, 15],
@@ -100,28 +124,46 @@ def test_filter_stats_concat_thickets_columns(thicket_axis_columns):
     # set string column values
     less_than_20 = ["less than 20"] * 21
     less_than_45 = ["less than 45"] * 25
-    less_than_178 = ["less than 75"] * 28
-    new_col = less_than_20 + less_than_45 + less_than_178
-    combined_th.statsframe.dataframe[("test", "test_string_column")] = new_col
-    # set numeric column values
-    combined_th.statsframe.dataframe[("test", "test_numeric_column")] = range(0, 74)
+
+    if intersection:
+        less_than_65 = ["less than 65"] * 18
+        new_col = less_than_20 + less_than_45 + less_than_65
+        combined_th.statsframe.dataframe[("test", "test_string_column")] = new_col
+        # set numeric column values
+        combined_th.statsframe.dataframe[("test", "test_numeric_column")] = range(0, 64)
+    else:
+        less_than_75 = ["less than 75"] * 28
+        new_col = less_than_20 + less_than_45 + less_than_75
+        combined_th.statsframe.dataframe[("test", "test_string_column")] = new_col
+        # set numeric column values
+        combined_th.statsframe.dataframe[("test", "test_numeric_column")] = range(0, 74)
 
     check_filter_stats(combined_th, columns_values)
 
 
-def test_query_concat_thickets_columns(thicket_axis_columns):
+def test_query_concat_thickets_columns(thicket_axis_columns, intersection):
     thickets, thickets_cp, combined_th = thicket_axis_columns
     # test arguments
-    hnids = [
-        0,
-        1,
-        2,
-        3,
-        4,
-        5,
-        6,
-        7,
-    ]  # "0" because top-level node "RAJAPerf" will be included in query result.
+    if intersection:
+        # Shorter graph for intersection
+        hnids = [
+            0,
+            1,
+            2,
+            3,
+            4,
+        ]
+    else:
+        hnids = [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+        ]  # "0" because top-level node "RAJAPerf" will be included in query result.
     query = (
         ht.QueryMatcher()
         .match("*")
@@ -134,3 +176,31 @@ def test_query_concat_thickets_columns(thicket_axis_columns):
     )
 
     check_query(combined_th, hnids, query)
+
+
+def test_filter_profile_concat_thickets_columns(thicket_axis_columns):
+    thickets, thickets_cp, combined_th = thicket_axis_columns
+
+    rm_profs = [
+        (1048576.0, "default"),
+        (1048576.0, "block_128"),
+        (1048576.0, "block_256"),
+    ]
+    keep_profs = [
+        (2097152.0, "block_256"),
+        (2097152.0, "default"),
+        (2097152.0, "block_128"),
+    ]
+
+    tk_filt = combined_th.filter_profile(keep_profs)
+
+    for component in [tk_filt.profile, tk_filt.profile_mapping.keys()]:
+        assert all([prof not in component for prof in rm_profs])
+        assert all([prof in component for prof in keep_profs])
+
+    assert 1048576.0 not in tk_filt.dataframe.index.get_level_values(
+        "ProblemSizeRunParam"
+    )
+    assert 2097152.0 in tk_filt.dataframe.index.get_level_values("ProblemSizeRunParam")
+    assert 1048576.0 not in tk_filt.metadata.index
+    assert 2097152.0 in tk_filt.metadata.index

@@ -83,7 +83,7 @@ class GroupBy(dict):
             if col not in index_names:
                 if col in tk_c.metadata.columns or col in df_columns:
                     if col not in df_columns:
-                        tk_c.metadata_column_to_perfdata(col)
+                        tk_c.metadata_columns_to_perfdata(col)
                     tk_c.dataframe = tk_c.dataframe.set_index(col, append=True)
                 else:
                     raise KeyError(f'"{col}" is not in the PerfData or MetaData.')
@@ -97,19 +97,25 @@ class GroupBy(dict):
             tk_c.dataframe.reset_index()
             .drop(list(tk_c.dataframe.columns) + ["node"], axis=1)
             .drop_duplicates()
-            .set_index("profile")
+            .set_index(tk_c.profile_idx_name)
         )
         if (
             len(new_profile_label_mapping_df.columns) > 1
         ):  # Make tuple values if more than 1 column
-            new_profile_label_mapping_df = new_profile_label_mapping_df.apply(
+            new_profile_label_mapping_series = new_profile_label_mapping_df.apply(
                 tuple, axis=1
             )
         else:  # Squeeze single column df into series
-            new_profile_label_mapping_df = new_profile_label_mapping_df.squeeze()
-        new_profile_label_mapping = (
-            new_profile_label_mapping_df.to_dict()
-        )  # Convert df to dict
+            new_profile_label_mapping_series = new_profile_label_mapping_df.squeeze()
+        # Single profile, single column squeeze results in single value, not series
+        if len(tk_c.profile) == 1:
+            new_profile_label_mapping = {
+                tk_c.profile[0]: new_profile_label_mapping_series
+            }
+        else:
+            new_profile_label_mapping = (
+                new_profile_label_mapping_series.to_dict()
+            )  # Convert df to dict
         new_profile = list(set(new_profile_label_mapping.values()))
         new_profile_mapping = defaultdict(list)
         for p in tk_c.profile:
@@ -120,11 +126,11 @@ class GroupBy(dict):
         tk_c.profile_mapping = new_profile_mapping
         # Aggregate metadata
         tk_c.metadata = tk_c.metadata.reset_index()
-        tk_c.metadata["profile"] = tk_c.metadata["profile"].map(
+        tk_c.metadata[tk_c.profile_idx_name] = tk_c.metadata[tk_c.profile_idx_name].map(
             new_profile_label_mapping
         )
-        tk_c.metadata = tk_c.metadata.set_index("profile")
-        tk_c.metadata = tk_c.metadata.groupby("profile").agg(_agg_rows)
+        tk_c.metadata = tk_c.metadata.set_index(tk_c.profile_idx_name)
+        tk_c.metadata = tk_c.metadata.groupby(tk_c.profile_idx_name).agg(_agg_rows)
 
         def _compute_agg_df(col_names, functions, _tk, _agg_cols, _perf_indices):
             agg_df = _tk.dataframe[_agg_cols].groupby(_perf_indices).agg(functions[0])

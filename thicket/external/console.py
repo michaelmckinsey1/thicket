@@ -1,4 +1,4 @@
-import warnings
+import math
 
 import numpy as np
 import pandas as pd
@@ -53,6 +53,8 @@ class ThicketRenderer(ConsoleRenderer):
         self.min_value = kwargs["min_value"]
         self.max_value = kwargs["max_value"]
         self.indices = kwargs["indices"]
+        self.hist_data = kwargs["hist_data"]
+        self.histogram = kwargs["histogram"]
 
         if self.color:
             self.colors = self.colors_enabled
@@ -83,12 +85,8 @@ class ThicketRenderer(ConsoleRenderer):
             self.second_metric = None
         elif isinstance(self.metric_columns, list):
             if len(self.metric_columns) > 2:
-                warnings.warn(
-                    "More than 2 metrics specified in metric_column=. Tree() will only show 2 metrics at a time. The remaining metrics will not be shown.",
-                    SyntaxWarning,
-                )
                 self.primary_metric = self.metric_columns[0]
-                self.second_metric = self.metric_columns[1]
+                self.second_metric = self.metric_columns[1:]
             elif len(self.metric_columns) == 2:
                 self.primary_metric = self.metric_columns[0]
                 self.second_metric = self.metric_columns[1]
@@ -102,15 +100,26 @@ class ThicketRenderer(ConsoleRenderer):
                     self.primary_metric
                 )
             )
-        if (
-            self.second_metric is not None
-            and self.second_metric not in dataframe.columns
-        ):
-            raise KeyError(
-                "metric_column={} does not exist in the dataframe, please select a valid column. See a list of the available metrics with GraphFrame.show_metric_columns().".format(
-                    self.second_metric
+        if self.second_metric is not None:
+            if (
+                isinstance(self.second_metric, str)
+                and self.second_metric not in dataframe.columns
+            ):
+                raise KeyError(
+                    "metric_column={} does not exist in the dataframe, please select a valid column. See a list of the available metrics with GraphFrame.show_metric_columns().".format(
+                        self.second_metric
+                    )
                 )
-            )
+            elif isinstance(self.second_metric, list) and any(
+                m not in dataframe.columns for m in self.second_metric
+            ):
+                for m in self.second_metric:
+                    if m not in dataframe.columns:
+                        raise KeyError(
+                            "metric_column={} does not exist in the dataframe, please select a valid column. See a list of the available metrics with GraphFrame.show_metric_columns().".format(
+                                m
+                            )
+                        )
 
         # grab the min and max value for the primary metric, ignoring inf and
         # nan values
@@ -232,11 +241,32 @@ class ThicketRenderer(ConsoleRenderer):
             )
 
             if self.second_metric is not None:
-                metric_str += " {c.faint}{second_metric:.{precision}f}{c.end}".format(
-                    second_metric=dataframe.loc[df_index, self.second_metric],
-                    precision=self.precision,
-                    c=self.colors,
-                )
+                if isinstance(self.second_metric, str):
+                    metric_str += (
+                        " {c.faint}{second_metric:.{precision}f}{c.end}".format(
+                            second_metric=dataframe.loc[df_index, self.second_metric],
+                            precision=self.precision,
+                            c=self.colors,
+                        )
+                    )
+                elif isinstance(self.second_metric, list):
+                    for count, m in enumerate(self.second_metric):
+                        if count == 0:
+                            metric_str += (
+                                " {c.faint}{second_metric:.{precision}f}{c.end}".format(
+                                    second_metric=dataframe.loc[df_index, m],
+                                    precision=self.precision,
+                                    c=self.colors,
+                                )
+                            )
+                        else:
+                            metric_str += (
+                                " {c.faint}{second_metric:.{precision}f}{c.end}".format(
+                                    second_metric=dataframe.loc[df_index, m],
+                                    precision=self.precision,
+                                    c=self.colors,
+                                )
+                            )
 
             if self.annotation_column is not None:
                 annotation_content = str(
@@ -258,10 +288,7 @@ class ThicketRenderer(ConsoleRenderer):
                 else:
                     metric_str += " [{}]".format(annotation_content)
 
-            if isinstance(dataframe.columns, pd.MultiIndex):
-                node_name = dataframe.loc[df_index, (self.name, "")]
-            else:
-                node_name = dataframe.loc[df_index, self.name]
+            node_name = dataframe.loc[df_index, self.name]
             if self.expand is False:
                 if len(node_name) > 39:
                     node_name = (
@@ -274,6 +301,49 @@ class ThicketRenderer(ConsoleRenderer):
             result = "{indent}{metric_str} {name_str}".format(
                 indent=indent, metric_str=metric_str, name_str=name_str
             )
+
+            if self.histogram:
+                hist_data = self.hist_data.loc[df_index]
+                nprofs = len(hist_data)
+                # Auto choose num bins
+                nintervals = min(math.ceil(math.sqrt(nprofs)), 20)
+                # Add min/max to tree
+                min_num = hist_data.min()
+                max_num = hist_data.max()
+                result += (
+                    f" ({min_num:.{self.precision}f}, {max_num:.{self.precision}f}) "
+                )
+                # Define unicode bars
+                bar_list = [
+                    "_",
+                    "\u2581",
+                    "\u2582",
+                    "\u2583",
+                    "\u2584",
+                    "\u2585",
+                    "\u2586",
+                    "\u2587",
+                    "\u2588",
+                ]
+                try:
+                    # Compute histogram intervals using pandas binning
+                    binned = pd.cut(hist_data, bins=nintervals)
+                    hist = binned.value_counts().sort_index()
+                    # Normalize values to the number of bars
+                    normalized_hist = (
+                        (len(bar_list) - 1)
+                        * (hist - hist.min())
+                        / (hist.max() - hist.min())
+                    )
+                    normalized_hist = normalized_hist.apply(np.ceil).astype(int)
+                    # Add histogram to tree
+                    for idx in normalized_hist.values:
+                        result += bar_list[idx]
+                except (
+                    ValueError or pd.errors.IntCastingNaNError
+                ):  # NA or inf cannot be binned
+                    pass
+
             if self.context in dataframe.columns:
                 result += " {c.faint}{context}{c.end}\n".format(
                     context=dataframe.loc[df_index, self.context], c=self.colors

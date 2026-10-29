@@ -6,9 +6,14 @@
 from thicket import Thicket
 
 
-def test_from_caliperreader(rajaperf_seq_O3_1M_cali):
+def test_from_caliperreader(rajaperf_seq_O3_1M_cali, intersection, fill_perfdata):
     """Sanity test a thicket object with known data."""
-    tk = Thicket.from_caliperreader(rajaperf_seq_O3_1M_cali[0], disable_tqdm=True)
+    tk = Thicket.from_caliperreader(
+        rajaperf_seq_O3_1M_cali[0],
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
 
     # Check the object type
     assert isinstance(tk, Thicket)
@@ -25,10 +30,16 @@ def test_from_caliperreader(rajaperf_seq_O3_1M_cali):
     )
 
 
-def test_node_ordering_from_caliper(caliper_ordered):
+def test_node_ordering_from_caliper(caliper_ordered, intersection, fill_perfdata):
     """Check the order of output from the native Caliper reader by examining a known input with node order column."""
 
-    tk = Thicket.from_caliperreader(caliper_ordered)
+    tk = Thicket.from_caliperreader(
+        caliper_ordered[0],
+        node_ordering=True,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
 
     expected_order = [
         "main",
@@ -89,3 +100,39 @@ def test_node_ordering_from_caliper(caliper_ordered):
         location = output.find(str(i) + ".000")
         assert location != -1
         output = output[location:]
+
+    # test node ordering True for multiple profiles
+    tk_multi = Thicket.from_caliperreader(
+        caliper_ordered,
+        node_ordering=True,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
+    assert tk_multi.graph.node_ordering
+
+    # Because these two profiles have the same graph, nodes should be exactly the same
+    for node_tk, node_tk_multi in zip(tk.graph.traverse(), tk_multi.graph.traverse()):
+        assert node_tk.frame["name"] == node_tk_multi.frame["name"]
+
+    # Test update_inclusive_columns
+    # This data is inclusive already, but sufficient for testing.
+    tk_multi.update_inclusive_columns()
+    assert (
+        abs(
+            tk_multi.dataframe.loc[
+                tk_multi.get_node("main"), "Avg time/rank (inc)"
+            ].iloc[0]
+            - 8.16487
+        )
+        < 1e-4
+    )
+    assert (
+        abs(
+            tk_multi.dataframe.loc[
+                tk_multi.get_node("LagrangeElements"), "Avg time/rank (inc)"
+            ].iloc[0]
+            - 1.91470
+        )
+        < 1e-4
+    )

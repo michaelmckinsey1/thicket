@@ -12,19 +12,36 @@ import pytest
 from thicket import Thicket
 
 
+@pytest.fixture(params=[True, False], ids=["FillPerfdata", "NoFillPerfdata"])
+def fill_perfdata(request):
+    return request.param
+
+
+@pytest.fixture(params=[True, False], ids=["Intersection", "Union"])
+def intersection(request):
+    return request.param
+
+
 @pytest.fixture
-def thicket_axis_columns(rajaperf_cali_1trial):
+def thicket_axis_columns(rajaperf_cali_1trial, intersection, fill_perfdata):
     """Generator for 'concat_thickets(axis="columns")' thicket.
 
     Arguments:
-        mpi_scaling_cali (list): List of Caliper files for MPI scaling study.
-        rajaperf_cuda_block128_1M_cali (list): List of Caliper files for base cuda variant.
+        rajaperf_cali_1trial (list): All tunings and variants for the first trial.
+        intersection (bool): Whether to use intersection or union for calltree.
+        fill_perfdata (bool): Whether to fill perfdata or not.
 
     Returns:
         list: List of original thickets, list of deepcopies of original thickets, and
             column-joined thicket.
     """
-    tk = Thicket.from_caliperreader(rajaperf_cali_1trial, disable_tqdm=True)
+    tk = Thicket.from_caliperreader(
+        rajaperf_cali_1trial,
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
 
     gb = tk.groupby("tuning")
 
@@ -36,6 +53,7 @@ def thicket_axis_columns(rajaperf_cali_1trial):
     combined_th = Thicket.concat_thickets(
         thickets=thickets,
         axis="columns",
+        calltree="intersection" if intersection else "union",
         headers=headers,
         metadata_key="ProblemSizeRunParam",
         disable_tqdm=True,
@@ -45,21 +63,33 @@ def thicket_axis_columns(rajaperf_cali_1trial):
 
 
 @pytest.fixture
-def stats_thicket_axis_columns(rajaperf_cuda_block128_1M_cali):
+def stats_thicket_axis_columns(
+    rajaperf_cuda_block128_1M_cali, intersection, fill_perfdata
+):
     """Generator for 'concat_thickets(axis="columns")' thicket for test_stats.py.
 
     Arguments:
         rajaperf_cuda_block128_1M_cali (list): List of Caliper files for base cuda variant.
+        intersection (bool): Whether to use intersection or union for calltree.
+        fill_perfdata (bool): Whether to fill perfdata or not.
 
     Returns:
         list: List of original thickets, list of deepcopies of original thickets, and
             column-joined thicket.
     """
     th_cuda128_1 = Thicket.from_caliperreader(
-        rajaperf_cuda_block128_1M_cali[0:4], disable_tqdm=True
+        rajaperf_cuda_block128_1M_cali[0:4],
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
     )
     th_cuda128_2 = Thicket.from_caliperreader(
-        rajaperf_cuda_block128_1M_cali[5:9], disable_tqdm=True
+        rajaperf_cuda_block128_1M_cali[5:9],
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
     )
 
     # To check later if modifications were unexpectedly made
@@ -71,6 +101,7 @@ def stats_thicket_axis_columns(rajaperf_cuda_block128_1M_cali):
     combined_th = Thicket.concat_thickets(
         thickets=thickets,
         axis="columns",
+        calltree="intersection" if intersection else "union",
         headers=["Cuda 1", "Cuda 2"],
         disable_tqdm=True,
     )
@@ -177,12 +208,15 @@ def rajaperf_unique_tunings(data_dir, tmpdir):
 def caliper_ordered(data_dir, tmpdir):
     """Builds a temporary directory containing the lulesh cali file."""
     cali_json_dir = os.path.join(data_dir, "caliper-ordered")
-    cali_file = os.path.join(cali_json_dir, "230525-151052_1930517_eWbGeyrlBOPT.cali")
 
-    shutil.copy(cali_file, str(tmpdir))
-    tmpfile = os.path.join(str(tmpdir), "230525-151052_1930517_eWbGeyrlBOPT.cali")
+    cali_files = [
+        cali_json_dir + "/230525-151052_1930517_eWbGeyrlBOPT.cali",
+        cali_json_dir + "/230525-151052_1930517_eWbGeyrlBOPT_copy.cali",
+    ]
 
-    return tmpfile
+    for cf in cali_files:
+        shutil.copy(cf, str(tmpdir))
+    return [os.path.join(str(tmpdir), f) for f in cali_files]
 
 
 @pytest.fixture
@@ -262,3 +296,39 @@ def literal_thickets():
     thickets = [tk, tk2, tk3]
 
     return thickets
+
+
+@pytest.fixture
+def example_timeseries(data_dir, tmpdir):
+    """Timeseries Caliper file"""
+    cali_timeseries_dir = os.path.join(data_dir, "example-timeseries")
+    cali_file = os.path.join(cali_timeseries_dir, "timeseries.cali")
+
+    shutil.copy(cali_file, str(tmpdir))
+    tmpfile = os.path.join(str(tmpdir), "timeseries.cali")
+
+    return tmpfile
+
+
+@pytest.fixture
+def example_timeseries_cxx(data_dir, tmpdir):
+    """Timeseries Caliper file"""
+    cali_timeseries_dir = os.path.join(data_dir, "example-timeseries")
+    cali_file = os.path.join(cali_timeseries_dir, "cxx.cali")
+
+    shutil.copy(cali_file, str(tmpdir))
+    tmpfile = os.path.join(str(tmpdir), "cxx.cali")
+
+    return tmpfile
+
+
+@pytest.fixture
+def mem_power_timeseries(data_dir, tmpdir):
+    """Timeseries Caliper file"""
+    cali_timeseries_dir = os.path.join(data_dir, "example-timeseries")
+    cali_file = os.path.join(cali_timeseries_dir, "mem_power_timeseries.cali")
+
+    shutil.copy(cali_file, str(tmpdir))
+    tmpfile = os.path.join(str(tmpdir), "mem_power_timeseries.cali")
+
+    return tmpfile

@@ -7,11 +7,17 @@ import thicket.helpers as helpers
 from thicket import Thicket as th
 
 
-def test_intersection(rajaperf_cali_1trial):
-    tk = th.from_caliperreader(rajaperf_cali_1trial, disable_tqdm=True)
-
+def test_intersection(rajaperf_cali_1trial, fill_perfdata):
+    # Manually intersect
+    tk = th.from_caliperreader(
+        rajaperf_cali_1trial,
+        intersection=False,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
     intersected_tk = tk.intersection()
 
+    # Use argument during reader
     intersected_tk_other = th.from_caliperreader(
         rajaperf_cali_1trial, intersection=True, disable_tqdm=True
     )
@@ -20,12 +26,9 @@ def test_intersection(rajaperf_cali_1trial):
     assert len(intersected_tk.graph) == len(intersected_tk_other.graph)
 
     # Check original and intersected thickets
-    assert len(tk.dataframe) == 444
-    assert len(intersected_tk.dataframe) == 384
+    assert len(intersected_tk.graph) < len(tk.graph)
+    assert len(intersected_tk_other.graph) < len(tk.graph)
 
     # Check that nodes are synced between graph and dataframe
     assert helpers._are_synced(tk.graph, tk.dataframe)
     assert helpers._are_synced(intersected_tk.graph, intersected_tk.dataframe)
-
-    # Check graph length
-    assert len(intersected_tk.graph) < len(tk.graph)

@@ -9,10 +9,18 @@ import thicket as th
 from thicket.utils import DuplicateValueError
 
 
-def test_single_trial(mpi_scaling_cali):
+def test_single_trial(mpi_scaling_cali, intersection, fill_perfdata):
     th_list = []
     for file in mpi_scaling_cali:
-        th_list.append(th.Thicket.from_caliperreader(file, disable_tqdm=True))
+        th_list.append(
+            th.Thicket.from_caliperreader(
+                file,
+                node_ordering=False,
+                intersection=intersection,
+                fill_perfdata=fill_perfdata,
+                disable_tqdm=True,
+            )
+        )
 
     # Add arbitrary value to aggregated statistics table
     t_val = 0
@@ -23,7 +31,7 @@ def test_single_trial(mpi_scaling_cali):
     tk = th.Thicket.from_statsframes(th_list, disable_tqdm=True)
 
     # Check level values
-    assert set(tk.dataframe.index.get_level_values("profile")) == {
+    assert set(tk.dataframe.index.get_level_values(tk.profile_idx_name)) == {
         0,
         1,
         2,
@@ -49,8 +57,18 @@ def test_single_trial(mpi_scaling_cali):
     assert set(tk_named.dataframe["test"]) == {0, 2, 4, 6, 8}
 
 
-def test_multi_trial(rajaperf_cali_alltrials):
-    tk = th.Thicket.from_caliperreader(rajaperf_cali_alltrials)
+def test_multi_trial(
+    rajaperf_cali_alltrials,
+    intersection,
+    fill_perfdata,
+):
+    tk = th.Thicket.from_caliperreader(
+        rajaperf_cali_alltrials,
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
 
     # Simulate multiple trial from grouping by tuning.
     gb = tk.groupby("tuning")
@@ -69,4 +87,7 @@ def test_multi_trial(rajaperf_cali_alltrials):
             [list(gb.values())[0], list(gb.values())[0]], metadata_key="tuning"
         )
 
-    assert stk.dataframe.shape == (222, 2)
+    if intersection:
+        assert stk.dataframe.shape == (192, 2)
+    else:
+        assert stk.dataframe.shape == (222, 2)

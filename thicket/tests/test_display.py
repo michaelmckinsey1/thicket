@@ -9,9 +9,23 @@ import pytest
 
 import thicket as th
 
+seaborn_avail = True
+try:
+    import seaborn  # noqa: F401
+except ModuleNotFoundError:
+    seaborn_avail = False
 
-def test_display_histogram(rajaperf_seq_O3_1M_cali):
-    tk = th.Thicket.from_caliperreader(rajaperf_seq_O3_1M_cali, disable_tqdm=True)
+if not seaborn_avail:
+    pytest.skip("seaborn package not available", allow_module_level=True)
+
+
+def test_display_histogram(rajaperf_seq_O3_1M_cali, intersection, fill_perfdata):
+    tk = th.Thicket.from_caliperreader(
+        rajaperf_seq_O3_1M_cali,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
 
     node = pd.unique(tk.dataframe.reset_index()["node"])[4]
 
@@ -78,8 +92,13 @@ def test_display_histogram_columnar_join(thicket_axis_columns):
     plt.close()
 
 
-def test_display_heatmap(rajaperf_seq_O3_1M_cali):
-    tk = th.Thicket.from_caliperreader(rajaperf_seq_O3_1M_cali, disable_tqdm=True)
+def test_display_heatmap(rajaperf_seq_O3_1M_cali, intersection, fill_perfdata):
+    tk = th.Thicket.from_caliperreader(
+        rajaperf_seq_O3_1M_cali,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
 
     th.stats.variance(tk, columns=["Min time/rank"])
 
@@ -151,8 +170,13 @@ def test_display_heatmap_columnar_join(thicket_axis_columns):
     plt.close()
 
 
-def test_display_boxplot(rajaperf_seq_O3_1M_cali):
-    tk = th.Thicket.from_caliperreader(rajaperf_seq_O3_1M_cali, disable_tqdm=True)
+def test_display_boxplot(rajaperf_seq_O3_1M_cali, intersection, fill_perfdata):
+    tk = th.Thicket.from_caliperreader(
+        rajaperf_seq_O3_1M_cali,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
 
     nodes = list(pd.unique(tk.dataframe.reset_index()["node"])[0:2])
 

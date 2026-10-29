@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import collections
 import copy
 import os
 import pickle
@@ -12,11 +13,14 @@ import warnings
 import itertools
 from collections import defaultdict, OrderedDict
 from hashlib import md5
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import numpy as np
 from hatchet import GraphFrame
+from hatchet.frame import Frame
 from hatchet.graph import Graph
+from hatchet.node import Node
 from hatchet.query import QueryEngine
 from thicket.query import (
     Query,
@@ -28,6 +32,7 @@ from thicket.query import (
 import tqdm
 
 from thicket.ensemble import Ensemble
+from thicket.utils import _fill_perfdata
 
 try:
     from .ncu import NCUReader
@@ -42,6 +47,33 @@ from .utils import (
     validate_nodes,
 )
 from .external.console import ThicketRenderer
+
+
+# Must be at module top-level for ProcessPool pickling
+def _read_and_thicketize_one(f_pair, func, extra_args, kwargs):
+    # Runs in worker: call func, then thicketize, return final Thicket + path
+    file_idx = f_pair[0]
+    path = f_pair[1]
+    gf = func(path, *extra_args, **kwargs)
+    return Thicket.thicketize_graphframe(gf, path), path, file_idx
+
+
+# Top-level helper for merging a single pair (must be importable/pickleable)
+def _merge_pair_thicket(a, b, calltree, fill_perfdata, disable_tqdm):
+    # Validate both parameters
+    if a is None and b is None:
+        raise ValueError("Cannot merge: both thickets are None")
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return Thicket.concat_thickets(
+        thickets=[a, b],
+        axis="index",
+        calltree=calltree,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=disable_tqdm,
+    )
 
 
 class Thicket(GraphFrame):
@@ -59,6 +91,7 @@ class Thicket(GraphFrame):
         metadata={},
         performance_cols=None,
         profile=None,
+        profile_idx_name="profile",
         profile_mapping=None,
         statsframe=None,
         statsframe_ops_cache=None,
@@ -77,6 +110,7 @@ class Thicket(GraphFrame):
             performance_cols (list): list of numeric columns within the performance
                 dataframe
             profile (list): list of hashed profile strings
+            profile_idx_name (str): name of the profile index in the dataframe
             profile_mapping (dict): mapping of hashed profile strings to original strings
             statsframe (DataFrame): pandas DataFrame indexed by Nodes from the graph
         """
@@ -84,6 +118,7 @@ class Thicket(GraphFrame):
             graph, dataframe, exc_metrics, inc_metrics, default_metric, metadata
         )
         self.profile = profile
+        self.profile_idx_name = profile_idx_name
         self.profile_mapping = profile_mapping
         if statsframe is None:
             self.statsframe = GraphFrame(
@@ -153,7 +188,7 @@ class Thicket(GraphFrame):
         return s
 
     @staticmethod
-    def profile_hasher(obj, hex_len=8):
+    def profile_hasher(obj, hex_len=11):
         """Convert an object to a profile hash for Thicket.
 
         Arguments:
@@ -163,7 +198,6 @@ class Thicket(GraphFrame):
         Returns:
             (int): hash of the object
         """
-
         return int(md5(obj.encode("utf-8")).hexdigest()[:hex_len], 16)
 
     @staticmethod
@@ -198,14 +232,51 @@ class Thicket(GraphFrame):
             temp_meta = {}
             temp_meta[hash_arg] = th.metadata
             th.metadata = pd.DataFrame.from_dict(temp_meta, orient="index")
-            th.metadata.index.set_names("profile", inplace=True)
+            th.metadata.index.set_names(th.profile_idx_name, inplace=True)
 
             # Add profile to dataframe index
-            th.dataframe["profile"] = hash_arg
+            th.dataframe[th.profile_idx_name] = hash_arg
             index_names = list(th.dataframe.index.names)
-            index_names.insert(1, "profile")
+            index_names.insert(1, th.profile_idx_name)
             th.dataframe.reset_index(inplace=True)
             th.dataframe.set_index(index_names, inplace=True)
+
+        return th
+
+    @staticmethod
+    def thicketize_timeseries_graphframe(gf, iter_column="loop.start_iteration"):
+        """Necessary function to handle output from using GraphFrame readers.
+
+        Arguments:
+            gf (GraphFrame): hatchet GraphFrame object
+            iter_column (str): column name on which we split timeseries file
+                will be renamed to "iteration" and deleted, default is "loop.start_iteration"
+
+        Returns:
+            (thicket): Thicket object
+        """
+        th = Thicket(
+            graph=gf.graph,
+            dataframe=gf.dataframe,
+            exc_metrics=gf.exc_metrics,
+            inc_metrics=gf.inc_metrics,
+            metadata=gf.metadata,
+        )
+
+        # format metadata as a dict of dicts
+        temp_meta = {}
+        temp_meta["iteration"] = th.metadata
+        th.metadata = pd.DataFrame.from_dict(temp_meta, orient="index")
+        th.metadata.index.set_names("iteration", inplace=True)
+
+        # Use iter_column to set iteration dataframe index then delete it
+        iteration = int(th.dataframe[iter_column].dropna().max())
+        th.dataframe.drop(columns=[iter_column], inplace=True)
+        th.dataframe["iteration"] = iteration
+        index_names = list(th.dataframe.index.names)
+        index_names.insert(1, "iteration")
+        th.dataframe.reset_index(inplace=True)
+        th.dataframe.set_index(index_names, inplace=True)
 
         return th
 
@@ -216,6 +287,10 @@ class Thicket(GraphFrame):
 
     def to_pickle(self, filename, **kwargs):
         """Write a Thicket to a pickle file."""
+
+        # Clear out statsframe to ensure thicket obj is serializable
+        self.statsframe_ops_cache = {}
+
         pickle.dump(self, open(filename, "wb"), **kwargs)
 
     @staticmethod
@@ -270,11 +345,134 @@ class Thicket(GraphFrame):
         )
 
     @staticmethod
+    def from_hpctoolkit_latest(
+        dirname,
+        intersection=False,
+        disable_tqdm=False,
+        directory_mapping=None,
+        parallel_profiles_mode=False,
+        max_depth=None,
+        min_percentage_of_application_time=None,
+        exclude_mpi_function_details=False,
+        exclude_openmp_function_details=False,
+        exclude_cuda_function_details=False,
+        exclude_system_libraries_source_code=False,
+        exclude_function_call_lines=False,
+        exclude_no_source_code_instructions=False,
+        exclude_instructions=False,
+        exclude_non_function_nodes=False,
+        label_function_nodes=True,
+        metric_names=None,
+        metric_scopes=None,
+        summary_metrics=None,
+        profile_ranks=None,
+        sort_method="nodes",
+    ):
+        """Create a GraphFrame using hatchet's HPCToolkit reader and use its attributes
+        to make a new thicket.
+
+        Arguments:
+            dirname (str): directory containing HPCToolkit performance data
+            intersection (bool): whether to perform intersection or union (default)
+            disable_tqdm (bool): whether to display tqdm progress bar
+
+        Returns:
+            (thicket): new thicket containing HPCToolkit profile data
+        """
+
+        if parallel_profiles_mode:
+            graphframe = GraphFrame.from_hpctoolkit_latest(
+                dirname,
+                directory_mapping=directory_mapping,
+                parallel_profiles_mode=True,
+                max_depth=max_depth,
+                min_percentage_of_application_time=min_percentage_of_application_time,
+                exclude_mpi_function_details=exclude_mpi_function_details,
+                exclude_openmp_function_details=exclude_openmp_function_details,
+                exclude_cuda_function_details=exclude_cuda_function_details,
+                exclude_system_libraries_source_code=exclude_system_libraries_source_code,
+                exclude_function_call_lines=exclude_function_call_lines,
+                exclude_no_source_code_instructions=exclude_no_source_code_instructions,
+                exclude_instructions=exclude_instructions,
+                exclude_non_function_nodes=exclude_non_function_nodes,
+                label_function_nodes=label_function_nodes,
+                metric_names=metric_names,
+                metric_scopes=metric_scopes,
+                summary_metrics=summary_metrics,
+                profile_ranks=profile_ranks,
+            )
+
+            profile_ids = (
+                graphframe.dataframe.index.get_level_values(1).unique().to_numpy()
+            )
+            diff_dataframe = []
+
+            def visit_node(node) -> None:
+                temp = graphframe.dataframe.loc[node, :].index.unique().to_numpy()
+
+                for profile in np.setdiff1d(profile_ids, temp):
+                    diff_dataframe.append({"node": node, "profile": profile})
+
+                for child in node.children:
+                    visit_node(child)
+
+            root = graphframe.graph.roots[0]
+            visit_node(root)
+
+            if len(diff_dataframe):
+                diff_dataframe = pd.DataFrame(diff_dataframe).set_index(
+                    ["node", "profile"]
+                )
+                graphframe.dataframe = pd.concat([graphframe.dataframe, diff_dataframe])
+
+            return Thicket.thicketize_graphframe(graphframe, None)
+
+        else:
+
+            thicket = Thicket.reader_dispatch(
+                GraphFrame.from_hpctoolkit_latest,
+                intersection,
+                None,
+                disable_tqdm,
+                dirname,
+                directory_mapping=directory_mapping,
+                max_depth=max_depth,
+                min_percentage_of_application_time=min_percentage_of_application_time,
+                exclude_mpi_function_details=exclude_mpi_function_details,
+                exclude_openmp_function_details=exclude_openmp_function_details,
+                exclude_cuda_function_details=exclude_cuda_function_details,
+                exclude_system_libraries_source_code=exclude_system_libraries_source_code,
+                exclude_function_call_lines=exclude_function_call_lines,
+                exclude_no_source_code_instructions=exclude_no_source_code_instructions,
+                exclude_instructions=exclude_instructions,
+                metric_names=metric_names,
+                metric_scopes=metric_scopes,
+                summary_metrics=summary_metrics,
+                profile_ranks=profile_ranks,
+            )
+            thicket.dataframe = (
+                thicket.dataframe.reset_index()
+                .merge(
+                    thicket.metadata[["nodes" if sort_method == "nodes" else "date"]],
+                    how="left",
+                    left_on="profile",
+                    right_on="profile",
+                )
+                .set_index(["node", "profile"])
+                .sort_values("nodes" if sort_method == "nodes" else "date")
+                .drop("nodes" if sort_method == "nodes" else "date", axis=1)
+            )
+
+            return thicket
+
+    @staticmethod
     def from_caliperreader(
         filename_or_caliperreader,
         intersection=False,
         fill_perfdata=True,
         disable_tqdm=False,
+        node_ordering=False,
+        **kwargs,
     ):
         """Helper function to read one caliper file.
 
@@ -284,6 +482,7 @@ class Thicket(GraphFrame):
             intersection (bool): whether to perform intersection or union (default)
             fill_perfdata (bool): whether to fill missing performance data with NaNs
             disable_tqdm (bool): whether to display tqdm progress bar
+            node_ordering (bool): whether to apply node ordering to the graph
         """
         return Thicket.reader_dispatch(
             GraphFrame.from_caliperreader,
@@ -291,6 +490,57 @@ class Thicket(GraphFrame):
             fill_perfdata,
             disable_tqdm,
             filename_or_caliperreader,
+            node_ordering=node_ordering,
+            **kwargs,
+        )
+
+    @staticmethod
+    def from_timemory(
+        filename,
+        intersection=False,
+        fill_perfdata=True,
+        disable_tqdm=False,
+        **kwargs,
+    ):
+        """Helper function to read one timemory file
+
+        Arguments:
+            filename (str): name of a timemory json file
+            intersection (bool): whether to perform intersection or union (default)
+            fill_perfdata (bool): whether to fill missing performance data with NaNs
+            disable_tqdm (bool): whether to display tqdm progress bar
+        """
+        return Thicket.reader_dispatch(
+            GraphFrame.from_timemory,
+            intersection,
+            fill_perfdata,
+            disable_tqdm,
+            filename,
+            **kwargs,
+        )
+
+    @staticmethod
+    def from_perfflowaspect(
+        filename, intersection=False, fill_perfdata=True, disable_tqdm=False
+    ):
+        """Create a GraphFrame using hatchet's PerfFlowAspect reader and use
+        its attributes to make a new thicket.
+
+        Arguments:
+            filename (str): name of a PerfFlowAspect output file in .pfw format
+            intersection (bool): whether to perform intersection or union (default)
+            fill_perfdata (bool): whether to fill missing performance data with NaNs
+            disable_tqdm (bool): whether to display tqdm progress bar
+
+        Returns:
+            (thicket): new thicket containing PerfFlowAspect profile data
+        """
+        return Thicket.reader_dispatch(
+            GraphFrame.from_perfflowaspect,
+            intersection,
+            fill_perfdata,
+            disable_tqdm,
+            filename,
         )
 
     @staticmethod
@@ -329,9 +579,39 @@ class Thicket(GraphFrame):
 
         return tk
 
+    def from_timeseries(
+        filename_or_caliperreader, level="loop.start_iteration", intersection=False
+    ):
+        """Read in a single Caliper .cali file that has timeseries records
+        gets split into a list of graphframes by hatchet.
+
+        Arguments:
+            filename_or_stream (str or file-like): name of a Caliper timeseries output file in
+                `.cali` format, or an open file object to read one
+            level (str): level to split the timeseries, default "loop.start_iteration"
+            intersection (bool): whether to perform intersection or union (default)
+        """
+        # if we are reading a timeseries file we will expect a list back from the reader
+        ens_list = []
+        gf_list = GraphFrame.from_timeseries(filename_or_caliperreader)
+        for gf in gf_list:
+            ens_list.append(Thicket.thicketize_timeseries_graphframe(gf, level))
+
+        # Perform unify ensemble
+        thicket_object = Thicket.concat_thickets(ens_list)
+        return thicket_object
+
     @staticmethod
     def reader_dispatch(
-        func, intersection, fill_perfdata, disable_tqdm, *args, **kwargs
+        func,
+        intersection,
+        fill_perfdata,
+        disable_tqdm,
+        *args,
+        parallel=True,
+        max_workers=14,
+        use_threads=False,
+        **kwargs,
     ):
         """Create a thicket from a list, directory of files, or a single file.
 
@@ -355,8 +635,8 @@ class Thicket(GraphFrame):
                 if not os.path.isfile(file):
                     raise FileNotFoundError("File '" + file + "' not found")
         elif isinstance(obj, str):
-            if not os.path.isfile(obj):
-                raise FileNotFoundError("File '" + obj + "' not found")
+            if not os.path.exists(obj):
+                raise ValueError("Path '" + obj + "' not found")
         else:
             raise TypeError(
                 "'" + str(type(obj).__name__) + "' is not a valid type to be read from"
@@ -365,23 +645,84 @@ class Thicket(GraphFrame):
         # Parse the input object
         # if a list of files
         if isinstance(obj, (list, tuple)):
-            pbar = tqdm.tqdm(obj, disable=disable_tqdm)
-            for file in pbar:
+            files = list(obj)
+
+            if not parallel:
+                pbar = tqdm.tqdm(files, disable=disable_tqdm)
+                for file in pbar:
+                    pbar.set_description(pbar_desc)
+                    try:
+                        gf = func(file, *extra_args, **kwargs)
+                    except Exception as e:
+                        raise Exception(f"Failed to read file: {file}") from e
+                    ens_list.append(Thicket.thicketize_graphframe(gf, file))
+            else:
+                # Parallel read path (preserves input order)
+                Executor = ThreadPoolExecutor if use_threads else ProcessPoolExecutor
+                pbar = tqdm.tqdm(total=len(files), disable=disable_tqdm)
                 pbar.set_description(pbar_desc)
-                ens_list.append(
-                    Thicket.thicketize_graphframe(
-                        func(file, *extra_args, **kwargs), file
-                    )
-                )
+                # Map file -> index to restore order
+                enum_files = list(enumerate(files))
+                results = [None] * len(files)
+                # Submit all
+                with Executor(max_workers=max_workers) as ex:
+                    futures = {
+                        ex.submit(
+                            _read_and_thicketize_one, f, func, extra_args, kwargs
+                        ): f
+                        for f in enum_files
+                    }
+                    for fut in as_completed(futures):
+                        f = futures[fut]
+                        try:
+                            tk, path, f_idx = fut.result()
+                        except Exception as e:
+                            # Raise with filename context like your serial path
+                            raise Exception(f"Failed to read file: {f}") from e
+                        results[f_idx] = tk
+                        pbar.update(1)
+                pbar.close()
+                # Extend ens_list in original order
+                ens_list.extend(results)
         # if directory of files
         elif os.path.isdir(obj):
-            pbar = tqdm.tqdm(os.listdir(obj), disable=disable_tqdm)
-            for file in pbar:
+            dir_entries = os.listdir(obj)  # snapshot once
+            files = [os.path.join(obj, file) for file in dir_entries]
+
+            if not parallel:
+                pbar = tqdm.tqdm(dir_entries, disable=disable_tqdm)
+                for file in pbar:
+                    pbar.set_description(pbar_desc)
+                    f = os.path.join(obj, file)
+                    try:
+                        gf = func(f, *extra_args, **kwargs)
+                    except Exception as e:
+                        raise Exception(f"Failed to read file: {f}") from e
+                    ens_list.append(Thicket.thicketize_graphframe(gf, f))
+            else:
+                # Parallel read path (preserves directory listing order)
+                Executor = ThreadPoolExecutor if use_threads else ProcessPoolExecutor
+                pbar = tqdm.tqdm(total=len(files), disable=disable_tqdm)
                 pbar.set_description(pbar_desc)
-                f = os.path.join(obj, file)
-                ens_list.append(
-                    Thicket.thicketize_graphframe(func(f, *extra_args, **kwargs), f)
-                )
+                enum_files = list(enumerate(files))
+                results = [None] * len(files)
+                with Executor(max_workers=max_workers) as ex:
+                    futures = {
+                        ex.submit(
+                            _read_and_thicketize_one, f, func, extra_args, kwargs
+                        ): f
+                        for f in enum_files
+                    }
+                    for fut in as_completed(futures):
+                        f = futures[fut]
+                        try:
+                            tk, path, f_idx = fut.result()
+                        except Exception as e:
+                            raise Exception(f"Failed to read file: {f}") from e
+                        results[f_idx] = tk
+                        pbar.update(1)
+                pbar.close()
+                ens_list.extend(results)
         # if single file
         elif os.path.isfile(obj):
             return Thicket.thicketize_graphframe(func(*args, **kwargs), args[0])
@@ -390,15 +731,70 @@ class Thicket(GraphFrame):
         calltree = "union"
         if intersection:
             calltree = "intersection"
-        thicket_object = Thicket.concat_thickets(
-            thickets=ens_list,
-            axis="index",
-            calltree=calltree,
-            fill_perfdata=fill_perfdata,
-            disable_tqdm=disable_tqdm,
-        )
+        # Consider a binary tree with t leaves (Thickets) and 2t-1 total nodes (Full tree)
+        # This implies t-1 parents (Knuth 1997).
+        # Each non-leaf Thicket (parent) is a result of a concat_thickets, therefore
+        # we have t-1 concat_thickets operations. t == len(ens_list)
+        pbar = tqdm.tqdm(total=len(ens_list) - 1, disable=disable_tqdm)
 
-        return thicket_object
+        if not parallel:
+            # We start with t Thickets with 1 prof each until 1 Thicket with t profs.
+            # Each iteration is concatenating 2 Thickets with n, m profs into 1 Thicket
+            # with n+m profs, appending the new Thicket to the back of the ens_list.
+            while len(ens_list) > 1:
+                pbar.set_description("(2/2) Creating Thicket")
+                new_tk = Thicket.concat_thickets(
+                    thickets=[ens_list.pop(0), ens_list.pop(0)],
+                    axis="index",
+                    calltree=calltree,
+                    fill_perfdata=fill_perfdata,
+                    disable_tqdm=disable_tqdm,
+                )
+                ens_list.append(new_tk)
+                pbar.update(1)
+            pbar.close()
+            return ens_list.pop(0)
+        else:
+            # Parallel pairwise tree-reduction per level
+            pbar.set_description("(2/2) Creating Thicket (parallel)")
+            current = list(ens_list)
+            Executor = ThreadPoolExecutor if use_threads else ProcessPoolExecutor
+            with Executor(max_workers=max_workers) as ex:
+                while len(current) > 1:
+                    # Pair up (0,1), (2,3), ... ; if odd, last pair is (a, None)
+                    it = iter(current)
+                    pairs = list(itertools.zip_longest(it, it, fillvalue=None))
+
+                    # Submit merges; track which futures correspond to real merges (b is not None)
+                    futures = []
+                    is_merge = []
+                    for a, b in pairs:
+                        futures.append(
+                            ex.submit(
+                                _merge_pair_thicket,
+                                a,
+                                b,
+                                calltree,
+                                fill_perfdata,
+                                disable_tqdm,
+                            )
+                        )
+                        is_merge.append(b is not None)
+
+                    # Collect results as they complete and update progress for real merges
+                    next_round = []
+                    for fut in as_completed(futures):
+                        res = fut.result()
+                        next_round.append(res)
+                        # Update once for each completed "real" merge
+                        # (This keeps total updates at t-1 over all rounds)
+                        idx = futures.index(fut)
+                        if is_merge[idx]:
+                            pbar.update(1)
+
+                    current = next_round
+            pbar.close()
+            return current[0]
 
     @staticmethod
     def concat_thickets(
@@ -509,15 +905,16 @@ class Thicket(GraphFrame):
             dataframe=gf.dataframe,
             exc_metrics=thicket_dict["exclusive_metrics"],
             inc_metrics=thicket_dict["inclusive_metrics"],
-            profile=thicket_dict["profile"],
+            profile=thicket_dict[thicket_dict["profile_idx_name"]],
+            profile_idx_name=thicket_dict["profile_idx_name"],
             profile_mapping=thicket_dict["profile_mapping"],
         )
 
         if "metadata" in thicket_dict:
             mf = pd.DataFrame(thicket_dict["metadata"])
-            mf.set_index(mf["profile"], inplace=True)
-            if "profile" in mf.columns:
-                mf = mf.drop(columns=["profile"])
+            mf.set_index(mf[th.profile_idx_name], inplace=True)
+            if th.profile_idx_name in mf.columns:
+                mf = mf.drop(columns=[th.profile_idx_name])
             th.metadata = mf
 
         # catch condition where there are no stats
@@ -535,13 +932,22 @@ class Thicket(GraphFrame):
         # make and return thicket?
         return th
 
-    def add_ncu(self, ncu_report_mapping, chosen_metrics=None, overwrite=False):
+    def add_ncu(
+        self,
+        ncu_report_mapping,
+        chosen_metrics=None,
+        overwrite=False,
+        debug=False,
+        disable_tqdm=False,
+    ):
         """Add NCU data into the PerformanceDataFrame
 
         Arguments:
-            ncu_report_mapping (dict): mapping from NCU report file to profile
-            chosen_metrics (list): list of metrics to sub-select from NCU report
+            ncu_report_mapping (dict): mapping from NCU report file to Caliper CUDA Activity Profile
+            chosen_metrics (list): list of metrics to sub-select from NCU report. By default, all metrics are used.
             overwrite (bool): whether to overwrite existing columns in the Thicket.DataFrame
+            debug (bool): whether to print debug information
+            disable_tqdm (bool): whether to display tqdm progress bar
         """
 
         def _rep_agg_func(col):
@@ -557,20 +963,37 @@ class Thicket(GraphFrame):
             else:
                 return col[0]
 
-        # Check if chosen_metrics are in the dataframe
-        dupe_cols = [col for col in chosen_metrics if col in self.dataframe.columns]
-        if overwrite:
-            self.dataframe = self.dataframe.drop(columns=dupe_cols)
-        elif not overwrite and len(dupe_cols) > 0:
-            raise ValueError(
-                f"Columns {dupe_cols} already exist in the performance data table. Set overwrite=True to overwrite."
+        # If list, check for duplicate metrics
+        if isinstance(chosen_metrics, list):
+            # Remove duplicate metrics in chosen_metrics if the user provided duplicates
+            unique_metrics = list(set(chosen_metrics))
+            if len(unique_metrics) != len(chosen_metrics):
+                dupe_mets = [
+                    met
+                    for met, count in collections.Counter(chosen_metrics).items()
+                    if count > 1
+                ]
+                warnings.warn(
+                    f"Removing duplicate metrics in chosen_metrics: {dupe_mets}"
+                )
+            chosen_metrics = unique_metrics
+        elif chosen_metrics is None:
+            pass
+        else:
+            raise TypeError(
+                f"If provided, chosen_metrics ({type(chosen_metrics)}) must be a list"
             )
 
         # Initialize reader
         ncureader = NCUReader()
 
         # Dictionary of NCU data
-        data_dict, rollup_dict = ncureader._read_ncu(self, ncu_report_mapping)
+        data_dict, rollup_dict = ncureader._read_ncu(
+            thicket=self,
+            ncu_report_mapping=ncu_report_mapping,
+            debug=debug,
+            disable_tqdm=disable_tqdm,
+        )
 
         # Create empty df
         ncu_df = pd.DataFrame()
@@ -580,14 +1003,23 @@ class Thicket(GraphFrame):
             agg_data = pd.DataFrame.from_records(rep_data).agg(_rep_agg_func)
             # Add node and profile
             agg_data["node"] = node_profile[0]
-            agg_data["profile"] = node_profile[1]
+            agg_data[self.profile_idx_name] = node_profile[1]
             # Append to main df
             ncu_df = pd.concat([ncu_df, pd.DataFrame([agg_data])], ignore_index=True)
-        ncu_df = ncu_df.set_index(["node", "profile"])
+        ncu_df = ncu_df.set_index(["node", self.profile_idx_name])
 
         # Apply chosen metrics
         if chosen_metrics:
             ncu_df = ncu_df[chosen_metrics]
+
+        # Overwrite check. We can't check earlier, if chosen_metrics is None, as we haven't read the ncu file yet.
+        dupe_cols = [col for col in ncu_df.columns if col in self.dataframe.columns]
+        if overwrite:
+            self.dataframe = self.dataframe.drop(columns=dupe_cols)
+        elif not overwrite and len(dupe_cols) > 0:
+            raise ValueError(
+                f"Columns {dupe_cols} already exist in the performance data table. Set overwrite=True to overwrite."
+            )
 
         # Join NCU DataFrame into Thicket
         self.dataframe = self.dataframe.join(
@@ -598,35 +1030,55 @@ class Thicket(GraphFrame):
             rsuffix="_right",
         )
 
-    def metadata_column_to_perfdata(self, metadata_key, overwrite=False, drop=False):
-        """Add a column from the metadata table to the performance data table.
+    def metadata_columns_to_perfdata(
+        self, metadata_columns, overwrite=False, drop=False, join_key=None
+    ):
+        """Add columns from the metadata table to the performance data table. Joins on join_key, an index or column that is present in both tables.
 
         Arguments:
-            metadata_key (str): Name of the column from the metadata table
+            metadata_columns (list or str): List of the columns from the metadata table
             overwrite (bool): Determines overriding behavior in performance data table
-            drop (bool): Whether to drop the column from the metadata table afterwards
+            drop (bool): Whether to drop the columns from the metadata table afterwards
+            join_key (str): Name of the index/column to join on if not self.profile_idx_name
         """
+        if join_key is None:
+            join_key = self.profile_idx_name
+
+        # Raise error if join_key is not present in both tables
+        if not (
+            join_key in self.dataframe.reset_index()
+            and join_key in self.metadata.reset_index()
+        ):
+            raise KeyError(
+                f"'{join_key}' must be present (index or columns) for both the performance data table and metadata table."
+            )
+
+        # Convert metadata_columns to list if str
+        if isinstance(metadata_columns, str):
+            metadata_columns = [metadata_columns]
+
         # Add warning if column already exists in performance data table
-        if metadata_key in self.dataframe.columns:
-            # Drop column to overwrite, otherwise warn and return
-            if overwrite:
-                self.dataframe.drop(metadata_key, axis=1, inplace=True)
-            else:
-                warnings.warn(
-                    "Column "
-                    + metadata_key
-                    + " already exists. Set 'overwrite=True' to force update the column."
-                )
-                return
+        for mkey in metadata_columns:
+            if mkey in self.dataframe.columns:
+                # Drop column to overwrite, otherwise warn and return
+                if overwrite:
+                    self.dataframe.drop(mkey, axis=1, inplace=True)
+                else:
+                    warnings.warn(
+                        "Column "
+                        + mkey
+                        + " already exists. Set 'overwrite=True' to force update the column."
+                    )
+                    return
 
         # Add the column to the performance data table
         self.dataframe = self.dataframe.join(
-            self.metadata[metadata_key], on=self.dataframe.index.names[1]
+            self.metadata[metadata_columns], on=join_key
         )
 
         # Drop column
         if drop:
-            self.metadata.drop(metadata_key, axis=1, inplace=True)
+            self.metadata.drop(metadata_columns, axis=1, inplace=True)
 
     def squash(self, update_inc_cols=True, new_statsframe=True):
         """Rewrite the Graph to include only nodes present in the performance
@@ -833,7 +1285,9 @@ class Thicket(GraphFrame):
             metadata=self.metadata.copy(),
             profile=copy.deepcopy(self.profile),
             profile_mapping=copy.deepcopy(self.profile_mapping),
-            statsframe=self.statsframe.deepcopy(),
+            statsframe=GraphFrame(
+                graph=gf.graph, dataframe=self.statsframe.dataframe.copy(deep=True)
+            ),
             statsframe_ops_cache=self.statsframe_ops_cache.copy(),
         )
 
@@ -856,6 +1310,7 @@ class Thicket(GraphFrame):
         min_value=None,
         max_value=None,
         indices=None,
+        histogram=False,
     ):
         """Visualize the Thicket as a tree
 
@@ -877,6 +1332,7 @@ class Thicket(GraphFrame):
             min_value (int, optional): Overwrites the min value for the coloring legend. Defaults to None.
             max_value (int, optional): Overwrites the max value for the coloring legend. Defaults to None.
             indices(tuple, list, optional): Index/indices to display on the DataFrame. Defaults to None.
+            histogram (bool, optional): Whether to show a histogram next to each node of the data for all profiles. Defaults to False.
 
         Returns:
             (str): String representation of the tree, ready to print
@@ -885,6 +1341,9 @@ class Thicket(GraphFrame):
         shell = None
         if metric_column is None:
             metric_column = self.default_metric
+
+        if name_column == "name" and isinstance(self.dataframe.columns, pd.MultiIndex):
+            name_column = (name_column, "")
 
         if color is False:
             try:
@@ -922,8 +1381,26 @@ class Thicket(GraphFrame):
         }
         # Slices the DataFrame to simulate a single-level index
         try:
+            # Select only columns used by tree for efficiency in _fill_perfdata
+            df_cols = [
+                col
+                for col in [
+                    *(
+                        metric_column
+                        if isinstance(metric_column, list)
+                        else [metric_column]
+                    ),
+                    annotation_column,
+                    name_column,
+                    context_column,
+                ]
+                if col in self.dataframe.columns
+            ]
+            slice_df = self.dataframe.loc[:, df_cols]
+            # _fill_perfdata to make sure number of nodes in df == graph
+            slice_df = _fill_perfdata(slice_df)
             slice_df = (
-                self.dataframe.loc[(slice(None),) + indices, :]
+                slice_df.loc[(slice(None),) + indices, :]
                 .reset_index()
                 .set_index("node")
             )
@@ -967,6 +1444,8 @@ class Thicket(GraphFrame):
             min_value=min_value,
             max_value=max_value,
             indices=idx_dict,
+            hist_data=self.dataframe[metric_column],
+            histogram=histogram,
         )
 
     @staticmethod
@@ -989,7 +1468,7 @@ class Thicket(GraphFrame):
         # Pre-check of data structures
         for tk in tk_list:
             verify_thicket_structures(
-                tk.dataframe, index=["node", "profile"]
+                tk.dataframe, index=["node", tk.profile_idx_name]
             )  # Required for deepcopy operation
             verify_thicket_structures(
                 tk.statsframe.dataframe, index=["node"]
@@ -1100,7 +1579,8 @@ class Thicket(GraphFrame):
 
         jsonified_thicket["inclusive_metrics"] = self.inc_metrics
         jsonified_thicket["exclusive_metrics"] = self.exc_metrics
-        jsonified_thicket["profile"] = self.profile
+        jsonified_thicket[self.profile_idx_name] = self.profile
+        jsonified_thicket["profile_idx_name"] = self.profile_idx_name
         jsonified_thicket["profile_mapping"] = self.profile_mapping
 
         return json.dumps(jsonified_thicket)
@@ -1114,10 +1594,38 @@ class Thicket(GraphFrame):
             (thicket): intersected thicket
         """
 
-        # Row that didn't exist will contain "None" in the name column.
-        query = Query().match(
-            ".", lambda row: row["name"].apply(lambda n: n is not None).all()
-        )
+        # if concat_thickets(axis="columns")
+        if isinstance(self.dataframe.columns, pd.MultiIndex):
+            rows = []
+            nodes = self.dataframe.index.get_level_values("node").unique()
+            extend_len = len(self.dataframe) // len(nodes)
+            for node in nodes:
+                df = self.dataframe.loc[node]
+                keep = all(
+                    [
+                        df[header]
+                        .notna()  # We are checking for NA
+                        .all()  # For all values in a row
+                        .all()  # For all rows in the slice
+                        for header in self.dataframe.columns.get_level_values(0)
+                    ]  # For each column header df[header] == slice
+                )
+                rows.extend([keep] * extend_len)  # Extend by extend_len for MultiIndex
+            tkc = self.deepcopy()
+            tkc.dataframe = tkc.dataframe[rows]
+            tkc = tkc.squash()
+            return tkc
+        else:
+            # Check for padded perfdata
+            if self.dataframe["name"].isnull().any():
+                # Row that didn't exist will contain "None" in the name column.
+                query = Query().match(
+                    ".", lambda df: df["name"].apply(lambda n: n is not None).all()
+                )
+            else:
+                # If perfdata not padded
+                query = Query().match(".", lambda df: len(df) == len(self.profile))
+
         intersected_th = self.query(query)
 
         return intersected_th
@@ -1179,6 +1687,27 @@ class Thicket(GraphFrame):
         validate_profile(new_thicket)
 
         # If fill_perfdata is False, may need to squash
+        if len(new_thicket.graph) != len(
+            new_thicket.dataframe.index.get_level_values("node").unique()
+        ):
+            new_thicket = new_thicket.squash()
+
+        return new_thicket
+
+    def filter_profile(self, profile_list):
+        """Filter thicket object based on a list of profiles.
+
+        Arguments:
+            profile_list (list): list of profiles to filter on
+
+        Returns:
+            (thicket): new thicket object with selected profiles
+        """
+        new_thicket = self.deepcopy()
+
+        new_thicket._sync_profile_components(profile_list)
+        validate_profile(new_thicket)
+
         if len(new_thicket.graph) != len(
             new_thicket.dataframe.index.get_level_values("node").unique()
         ):
@@ -1344,44 +1873,50 @@ class Thicket(GraphFrame):
         Returns:
             (list): list of (sub)thickets
         """
-        if not self.metadata.empty:
-            # group metadata table by unique values in a column
-            sub_metadataframes = self.metadata.groupby(by, dropna=False)
-
-            # dictionary of sub_thickets
-            sub_thickets = {}
-
-            # for all unique groups of metadata table
-            for key, df in sub_metadataframes:
-                # create a thicket copy
-                sub_thicket = self.deepcopy()
-
-                # return unique group as the metadata table
-                sub_thicket.metadata = df
-
-                # find profiles in current unique group and filter performance data
-                # table
-                profile_id = df.index.values.tolist()
-                sub_thicket.dataframe = sub_thicket.dataframe[
-                    sub_thicket.dataframe.index.get_level_values("profile").isin(
-                        profile_id
-                    )
-                ]
-
-                # clear the aggregated statistics table for current unique group
-                sub_thicket.statsframe.dataframe = helpers._new_statsframe_df(
-                    sub_thicket.dataframe
-                )
-
-                # add thicket to dictionary
-                sub_thickets[key] = sub_thicket
-
-                sub_thicket._sync_profile_components(sub_thicket.metadata)
-                validate_profile(sub_thicket)
-        else:
+        if self.metadata.empty:
             raise EmptyMetadataTable(
                 "The provided Thicket object has an empty metadata table."
             )
+
+        # group metadata table by unique values in a column
+        sub_metadataframes = self.metadata.groupby(by, dropna=False)
+
+        # dictionary of sub_thickets
+        sub_thickets = {}
+
+        # for all unique groups of metadata table
+        for key, df in sub_metadataframes:
+            # create a thicket copy
+            sub_thicket = self.deepcopy()
+
+            # return unique group as the metadata table
+            sub_thicket.metadata = df
+
+            # find profiles in current unique group and filter performance data
+            # table
+            profile_id = df.index.values.tolist()
+            sub_thicket.dataframe = sub_thicket.dataframe[
+                sub_thicket.dataframe.index.get_level_values(
+                    self.profile_idx_name
+                ).isin(profile_id)
+            ]
+
+            # clear the aggregated statistics table for current unique group
+            sub_thicket.statsframe.dataframe = helpers._new_statsframe_df(
+                sub_thicket.dataframe
+            )
+
+            # If fill_perfdata is False, may need to squash
+            if len(sub_thicket.graph) != len(
+                sub_thicket.dataframe.index.get_level_values("node").unique()
+            ):
+                sub_thicket = sub_thicket.squash()
+
+            sub_thicket._sync_profile_components(sub_thicket.metadata)
+            validate_profile(sub_thicket)
+
+            # add thicket to dictionary
+            sub_thickets[key] = sub_thicket
 
         return GroupBy(by, sub_thickets)
 
@@ -1413,9 +1948,45 @@ class Thicket(GraphFrame):
         ]
 
         # filter nodes in the graphframe based on the dataframe nodes
+        # We want to preserve columns, so "new_statsframe=False",
+        # however to match graph filter we update statsframe.graph
         new_thicket = new_thicket.squash(new_statsframe=False)
+        new_thicket.statsframe.graph = new_thicket.graph
 
         return new_thicket
+
+    def move_metrics_to_statsframe(self, metric_columns, profile=None, override=False):
+        if not isinstance(metric_columns, (list, tuple)):
+            raise TypeError("'metric_columns' must be a list or tuple")
+        profile_list = self.dataframe.index.unique(level=self.profile_idx_name).tolist()
+        if profile is None and len(profile_list) != 1:
+            raise ValueError(
+                "Cannot move a metric to statsframe when there are multiple profiles. Set the 'profile' argument to the profile you want to move"
+            )
+        if profile is not None and profile not in profile_list:
+            raise ValueError("Invalid profile: {}".format(profile))
+        df_for_profile = None
+        if profile is None:
+            df_for_profile = self.dataframe.reset_index(
+                level=self.profile_idx_name, drop=True
+            )
+        else:
+            df_for_profile = self.dataframe.xs(
+                profile, level=self.profile_idx_name, drop_level=True
+            )
+        new_statsframe_df = self.statsframe.dataframe.copy(deep=True)
+        for c in metric_columns:
+            if c in new_statsframe_df and not override:
+                raise KeyError(
+                    "Column {} is already in statsframe. To replace the column, run with 'override=True'".format(
+                        c
+                    )
+                )
+            new_statsframe_df[c] = df_for_profile[c]
+        self.statsframe.dataframe = new_statsframe_df
+        verify_thicket_structures(
+            self.statsframe.dataframe, columns=metric_columns, index=["node"]
+        )
 
     def get_unique_metadata(self):
         """Get unique values per column in metadata.
@@ -1454,24 +2025,85 @@ class Thicket(GraphFrame):
 
         return sorted_meta
 
-    def _sync_profile_components(self, component):
-        """Synchronize the Performance DataFrame, Metadata Dataframe, profile and
-        profile mapping objects based on the component's index. This is useful when a
-        non-Thicket function modifies the profiles in an object and those changes need
-        to be reflected in the other objects.
+    def add_root_node(self, attrs):
+        """Add node at root level with given attributes.
 
         Arguments:
-            component (DataFrame) -> (Thicket.dataframe or Thicket.metadata): The index
-            of this component is used to synchronize the other objects.
+            attrs (dict): attributes for the new node which will be used to initilize the
+            node.frame.
+        """
+
+        new_node = Node(frame_obj=Frame(attrs=attrs))
+
+        # graph and statsframe.graph
+        self.graph.roots.append(new_node)
+
+        # Set hatchet nid and depth
+        self.graph.enumerate_traverse()
+
+        # dataframe
+        idx_levels = self.dataframe.index.names
+        new_idx = [[new_node]] + [self.profile]
+        new_node_df = pd.DataFrame(
+            index=pd.MultiIndex.from_product(new_idx, names=idx_levels)
+        )
+        new_node_df["name"] = attrs["name"]
+        self.dataframe = pd.concat([self.dataframe, new_node_df])
+
+        # statsframe.dataframe
+        self.statsframe.dataframe = helpers._new_statsframe_df(self.dataframe)
+        # Reapply stats operations after clearing statsframe dataframe
+        self.reapply_stats_operations()
+
+        # Check Thicket state
+        validate_nodes(self)
+
+    def get_node(self, name, which="first"):
+        """Get a node object in the Thicket by its Node.frame['name']. If more than one
+        node has the same name, use the 'which' argument to specify which node to return.
+
+        Arguments:
+            name (str): name of the node (Node.frame['name']).
+            which (str, optional): which node to return if multiple nodes have the same
+            name. Options are "first", "last", or "all". Defaults to "first".
 
         Returns:
-            (thicket): self
+            (Node or list(Node)): Node object with the given name or list of Node objects
+            with the given name.
+        """
+        nodes = [n for n in self.graph.traverse() if n.frame["name"] == name]
+
+        if len(nodes) == 0:
+            raise KeyError(f'Node with name "{name}" not found.')
+
+        if len(nodes) == 1 or which == "first":
+            return nodes[0]
+        elif which == "last":
+            return nodes[-1]
+        elif which == "all":
+            return nodes
+        else:
+            raise ValueError(
+                'Invalid value for "which". Options are "first", "last", or "all".'
+            )
+
+    def _sync_profile_components(self, component):
+        """Synchronize the Performance DataFrame, Metadata Dataframe, profile and
+        profile mapping objects based on the component's index or a list of profiles.
+        This is useful when a non-Thicket function modifies the profiles in an object
+        and those changes need to be reflected in the other objects.
+
+        Arguments:
+            component (list or DataFrame) -> (list, Thicket.dataframe, or Thicket.metadata): The index
+            of this component is used to synchronize the other objects.
         """
 
         def _profile_truth_from_component(component):
             """Derive the profiles from the component index."""
+            if isinstance(component, list):
+                return component
             # Option A: Columnar-indexed Thicket
-            if isinstance(component.columns, pd.MultiIndex):
+            elif isinstance(component.columns, pd.MultiIndex):
                 # Performance DataFrame
                 if isinstance(component.index, pd.MultiIndex):
                     row_idx = component.index.droplevel(level="node")
@@ -1493,7 +2125,7 @@ class Thicket(GraphFrame):
                     profile_truth = component.index
             return list(set(profile_truth))
 
-        def _sync_indices(component, profile_truth):
+        def _sync_indices(profile_truth):
             """Sync the Thicket attributes"""
             self.profile = profile_truth
             self.profile_mapping = OrderedDict(
@@ -1505,12 +2137,12 @@ class Thicket(GraphFrame):
             )
 
             # For Columnar-indexed Thicket
-            if isinstance(component.columns, pd.MultiIndex):
+            if isinstance(self.dataframe.columns, pd.MultiIndex):
                 # Create powerset from all profiles
                 pset = set()
                 for p in profile_truth:
                     pset.update(helpers._powerset_from_tuple(p))
-                profile_truth = pset
+                profile_truth = list(pset)
 
             self.dataframe = self.dataframe[
                 self.dataframe.index.droplevel(level="node").isin(profile_truth)
@@ -1519,15 +2151,56 @@ class Thicket(GraphFrame):
 
             return self
 
-        if not isinstance(component, pd.DataFrame):
+        if isinstance(component, list) or isinstance(component, pd.DataFrame):
+            profile_truth = _profile_truth_from_component(component)
+            self = _sync_indices(profile_truth)
+        else:
             raise ValueError(
-                "Component must be either Thicket.dataframe or Thicket.metadata"
+                "Component must be either list, Thicket.dataframe, or Thicket.metadata"
             )
 
-        profile_truth = _profile_truth_from_component(component)
-        self = _sync_indices(component, profile_truth)
+    def replace_profile_index(self, metadata_key, inplace=True):
+        """Replace the profile index, i.e., self.profile_idx_name with a column from the metadata.
 
-        return self
+        Arguments:
+            metadata_key (str): name of the metadata column to use as the new index.
+
+        Returns:
+            (thicket): new thicket object with replaced index
+        """
+        if metadata_key not in self.metadata.columns:
+            raise KeyError(
+                f"Metadata key '{metadata_key}' not found in metadata table."
+            )
+        elif not self.metadata[metadata_key].is_unique:
+            raise ValueError(
+                f"Values in metadata column '{metadata_key}' are not unique."
+            )
+
+        new_thicket = self
+        if not inplace:
+            new_thicket = self.deepcopy()
+
+        # Create mapping from profile to metadata_key
+        idx_col_dict = new_thicket.metadata[metadata_key].to_dict()
+        # Set new index in performance data
+        new_thicket.metadata_columns_to_perfdata(metadata_key)
+        new_thicket.dataframe = new_thicket.dataframe.reset_index().set_index(
+            ["node", metadata_key]
+        )
+        # Set new index in metadata
+        new_thicket.metadata = new_thicket.metadata.set_index(metadata_key)
+        # Set new profile_idx_name
+        new_thicket.profile_idx_name = metadata_key
+        # Create new profile_mapping
+        new_thicket.profile_mapping = OrderedDict(
+            (idx_col_dict.get(k), v) for k, v in new_thicket.profile_mapping.items()
+        )
+
+        new_thicket._sync_profile_components(new_thicket.metadata)
+        validate_profile(new_thicket)
+
+        return new_thicket
 
 
 class InvalidFilter(Exception):

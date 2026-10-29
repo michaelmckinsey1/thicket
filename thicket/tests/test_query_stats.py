@@ -58,13 +58,17 @@ def check_query(th_x, hnids, query):
     assert all([n in pd.unique(filt_th_df_nodes) for n in sframe_nodes])
     assert sorted(pd.unique(filt_th_df_nodes)) == sorted(pd.unique(sframe_nodes))
 
-    check_identity(th_x, filt_th, "default_metric")
+    check_identity(th_x, filt_th, ["default_metric", "profile_idx_name"])
 
 
-def test_query_stats(rajaperf_cuda_block128_1M_cali):
+def test_query_stats(rajaperf_cuda_block128_1M_cali, intersection, fill_perfdata):
     # test thicket
     th_x = th.Thicket.from_caliperreader(
-        rajaperf_cuda_block128_1M_cali, disable_tqdm=True
+        rajaperf_cuda_block128_1M_cali,
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
     )
     th.stats.mean(th_x, columns=["Min time/rank"])
     # test arguments
@@ -78,9 +82,23 @@ def test_query_stats(rajaperf_cuda_block128_1M_cali):
     check_query(th_x, hnids, query)
 
 
-def test_object_dialect_column_multi_index(rajaperf_seq_O3_1M_cali):
-    th1 = th.Thicket.from_caliperreader(rajaperf_seq_O3_1M_cali[0])
-    th2 = th.Thicket.from_caliperreader(rajaperf_seq_O3_1M_cali[1])
+def test_object_dialect_column_multi_index(
+    rajaperf_seq_O3_1M_cali, intersection, fill_perfdata
+):
+    th1 = th.Thicket.from_caliperreader(
+        rajaperf_seq_O3_1M_cali[0],
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
+    th2 = th.Thicket.from_caliperreader(
+        rajaperf_seq_O3_1M_cali[1],
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
     th_cj = th.Thicket.concat_thickets([th1, th2], axis="columns")
 
     th.stats.mean(th_cj, columns=[(0, "Min time/rank")])
@@ -93,13 +111,12 @@ def test_object_dialect_column_multi_index(rajaperf_seq_O3_1M_cali):
         ),
     ]
 
-    root = th_cj.graph.roots[0]
     match = list(
         set(
             [
-                root,  # RAJAPerf
-                root.children[3],  # RAJAPerf.Lcals
-                root.children[4],  # RAJAPerf.Polybench
+                th_cj.get_node("RAJAPerf"),
+                th_cj.get_node("Lcals"),
+                th_cj.get_node("Polybench"),
             ]
         )
     )
@@ -135,9 +152,23 @@ def test_object_dialect_column_multi_index(rajaperf_seq_O3_1M_cali):
     ).all()
 
 
-def test_string_dialect_column_multi_index(rajaperf_seq_O3_1M_cali):
-    th1 = th.Thicket.from_caliperreader(rajaperf_seq_O3_1M_cali[0])
-    th2 = th.Thicket.from_caliperreader(rajaperf_seq_O3_1M_cali[1])
+def test_string_dialect_column_multi_index(
+    rajaperf_seq_O3_1M_cali, intersection, fill_perfdata
+):
+    th1 = th.Thicket.from_caliperreader(
+        rajaperf_seq_O3_1M_cali[0],
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
+    th2 = th.Thicket.from_caliperreader(
+        rajaperf_seq_O3_1M_cali[1],
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
     th_cj = th.Thicket.concat_thickets([th1, th2], axis="columns")
 
     th.stats.mean(th_cj, columns=[(0, "Min time/rank")])
@@ -147,13 +178,12 @@ def test_string_dialect_column_multi_index(rajaperf_seq_O3_1M_cali):
     WHERE p.(0, "Min time/rank_mean") > 30.0 AND p.(1, "Min time/rank_mean") > 30.0
     """
 
-    root = th_cj.graph.roots[0]
     match = list(
         set(
             [
-                root,  # RAJAPerf
-                root.children[3],  # RAJAPerf.Lcals
-                root.children[4],  # RAJAPerf.Polybench
+                th_cj.get_node("RAJAPerf"),
+                th_cj.get_node("Lcals"),
+                th_cj.get_node("Polybench"),
             ]
         )
     )

@@ -6,8 +6,13 @@
 from thicket import Thicket
 
 
-def test_copy(rajaperf_seq_O3_1M_cali):
-    self = Thicket.from_caliperreader(rajaperf_seq_O3_1M_cali[0], disable_tqdm=True)
+def test_copy(rajaperf_seq_O3_1M_cali, intersection, fill_perfdata):
+    self = Thicket.from_caliperreader(
+        rajaperf_seq_O3_1M_cali[0],
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
     self.exc_metrics.append("value")
     other = self.copy()
 
@@ -55,7 +60,7 @@ def test_copy(rajaperf_seq_O3_1M_cali):
 
     # Shallow copy of data
     node = other.dataframe.index.get_level_values("node")[0]
-    profile = other.dataframe.index.get_level_values("profile")[0]
+    profile = other.dataframe.index.get_level_values(other.profile_idx_name)[0]
     other.dataframe.loc[(node, profile), "nid"] = -1
     assert (
         other.dataframe.loc[(node, profile), "nid"]
@@ -67,8 +72,13 @@ def test_copy(rajaperf_seq_O3_1M_cali):
     )
 
 
-def test_deepcopy(rajaperf_seq_O3_1M_cali):
-    self = Thicket.from_caliperreader(rajaperf_seq_O3_1M_cali[0], disable_tqdm=True)
+def test_deepcopy(rajaperf_seq_O3_1M_cali, intersection, fill_perfdata):
+    self = Thicket.from_caliperreader(
+        rajaperf_seq_O3_1M_cali[0],
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
     self.exc_metrics.append("value")
     other = self.deepcopy()
 
@@ -121,3 +131,6 @@ def test_deepcopy(rajaperf_seq_O3_1M_cali):
     assert len(self.dataframe.columns) + len(self.dataframe.index[0]) == len(
         other.dataframe.reset_index().columns
     )
+
+    # Check new graph is statsframe graph
+    assert other.graph is other.statsframe.graph

@@ -9,20 +9,17 @@
 ###############################
 
 This is an introduction to Thicket with a presentation and live demos. It was
-presented as a virtual event at the `2023 RADIUSS Tutorial Series
-<https://software.llnl.gov/radiuss/event/2023/07/11/radiuss-on-aws/>`_,
-August 14, 2023, alongside Caliper.
+presented virtually at the `HPCIC Tutorial Series <https://hpcic.llnl.gov/tutorials>`_,
+August 4, 2026, alongside Caliper.
 
-.. image:: images/thicket-tutorial-slide-preview.png
-   :target: _static/thicket-radiuss23-tutorial-slides.pdf
+.. image:: images/thicket-hpcic26-tutorial-slide-preview.jpg
+   :target: _static/2026_Thicket_Tutorial_HPCIC.pdf
    :height: 72px
    :align: left
    :alt: Slide Preview
 
-:download:`Download Slides <_static/thicket-radiuss23-tutorial-slides.pdf>`.
+:download:`Download Slides <_static/2026_Thicket_Tutorial_HPCIC.pdf>`.
 
-We provide scripts that take you through some of the available features in
-Thicket. They correspond to sections in the slides above.
-
-To run through the scripts, you can follow the instructions to build the docker
-image in `thicket-tutorial <https://github.com/llnl/thicket-tutorial>`_.
+We provide an AWS instance containing Jupyter notebooks that will take you
+through some of the available features in Thicket. They correspond to sections
+in the slides above.

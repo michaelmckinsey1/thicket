@@ -48,12 +48,18 @@ def check_query(th, hnids, query):
         th_df_profiles.unique().to_list()
     )
 
-    check_identity(th, filt_th, "default_metric")
+    check_identity(th, filt_th, ["default_metric", "profile_idx_name"])
 
 
-def test_query(rajaperf_cuda_block128_1M_cali):
+def test_query(rajaperf_cuda_block128_1M_cali, intersection, fill_perfdata):
     # test thicket
-    th = Thicket.from_caliperreader(rajaperf_cuda_block128_1M_cali, disable_tqdm=True)
+    th = Thicket.from_caliperreader(
+        rajaperf_cuda_block128_1M_cali,
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
     # test arguments
     hnids = [0, 1, 2, 3, 4]  # 5, 6, 7 have Nones
     query = (
@@ -70,25 +76,38 @@ def test_query(rajaperf_cuda_block128_1M_cali):
     check_query(th, hnids, query)
 
 
-def test_object_dialect_column_multi_index(rajaperf_seq_O3_1M_cali):
-    th1 = Thicket.from_caliperreader(rajaperf_seq_O3_1M_cali[0])
-    th2 = Thicket.from_caliperreader(rajaperf_seq_O3_1M_cali[1])
+def test_object_dialect_column_multi_index(
+    rajaperf_seq_O3_1M_cali, intersection, fill_perfdata
+):
+    th1 = Thicket.from_caliperreader(
+        rajaperf_seq_O3_1M_cali[0],
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
+    th2 = Thicket.from_caliperreader(
+        rajaperf_seq_O3_1M_cali[1],
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
     th_cj = Thicket.concat_thickets([th1, th2], axis="columns")
 
     query = [
         ("+", {(0, "Avg time/rank"): "> 10.0", (1, "Avg time/rank"): "> 10.0"}),
     ]
 
-    root = th_cj.graph.roots[0]
     match = list(
         set(
             [
-                root,  # RAJAPerf
-                root.children[1],  # RAJAPerf.Apps
-                root.children[2],  # RAJAPerf.Basic
-                root.children[3],  # RAJAPerf.Lcals
-                root.children[3].children[0],  # RAJAPerf.Lcals.Lcals_DIFF_PREDICT
-                root.children[4],  # RAJAPerf.Polybench
+                th_cj.get_node("RAJAPerf"),
+                th_cj.get_node("Basic"),
+                th_cj.get_node("Lcals"),
+                th_cj.get_node("Lcals_DIFF_PREDICT"),
+                th_cj.get_node("Polybench"),
+                th_cj.get_node("Apps"),
             ]
         )
     )
@@ -108,25 +127,38 @@ def test_object_dialect_column_multi_index(rajaperf_seq_O3_1M_cali):
     ).all()
 
 
-def test_string_dialect_column_multi_index(rajaperf_seq_O3_1M_cali):
-    th1 = Thicket.from_caliperreader(rajaperf_seq_O3_1M_cali[0])
-    th2 = Thicket.from_caliperreader(rajaperf_seq_O3_1M_cali[1])
+def test_string_dialect_column_multi_index(
+    rajaperf_seq_O3_1M_cali, intersection, fill_perfdata
+):
+    th1 = Thicket.from_caliperreader(
+        rajaperf_seq_O3_1M_cali[0],
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
+    th2 = Thicket.from_caliperreader(
+        rajaperf_seq_O3_1M_cali[1],
+        node_ordering=False,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
     th_cj = Thicket.concat_thickets([th1, th2], axis="columns")
 
     query = """MATCH ("+", p)
     WHERE p.(0, "Avg time/rank") > 10.0 AND p.(1, "Avg time/rank") > 10.0
     """
 
-    root = th_cj.graph.roots[0]
     match = list(
         set(
             [
-                root,  # RAJAPerf
-                root.children[1],  # RAJAPerf.Apps
-                root.children[2],  # RAJAPerf.Basic
-                root.children[3],  # RAJAPerf.Lcals
-                root.children[3].children[0],  # RAJAPerf.Lcals.Lcals_DIFF_PREDICT
-                root.children[4],  # RAJAPerf.Polybench
+                th_cj.get_node("RAJAPerf"),
+                th_cj.get_node("Basic"),
+                th_cj.get_node("Lcals"),
+                th_cj.get_node("Lcals_DIFF_PREDICT"),
+                th_cj.get_node("Polybench"),
+                th_cj.get_node("Apps"),
             ]
         )
     )

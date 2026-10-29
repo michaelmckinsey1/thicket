@@ -3,8 +3,10 @@
 #
 # SPDX-License-Identifier: MIT
 
-from collections import OrderedDict, defaultdict
+from collections import Counter, OrderedDict, defaultdict
+import warnings
 
+import numpy as np
 import pandas as pd
 
 from thicket import helpers
@@ -70,10 +72,11 @@ def validate_dataframe(df):
         """Check for duplicate values in the innermost indices."""
         for node in set(df.index.get_level_values("node")):
             inner_idx_values = sorted(df.loc[node].index.tolist())
-            inner_idx_values_set = sorted(list(set(inner_idx_values)))
-            if inner_idx_values != inner_idx_values_set:
+            counts = Counter(inner_idx_values)
+            duplicates = [item for item, count in counts.items() if count > 1]
+            if len(duplicates) > 0:
                 raise DuplicateIndexError(
-                    f"Duplicate index {set(inner_idx_values)} found in DataFrame index."
+                    f"Duplicate indices found in DataFrame index.\n\t{duplicates}"
                 )
 
     def _check_missing_hnid(df):
@@ -256,3 +259,38 @@ def validate_nodes(tk):
         raise ValueError(
             f"Node objects do not match between Thicket.graph, Thicket.dataframe, and Thicket.statsframe.dataframe.\n{debug_str}"
         )
+
+
+def _fill_perfdata(df):
+    """Create full index for DataFrame and fill created rows with NaN's or Nones where applicable.
+
+    Arguments:
+        df (DataFrame): DataFrame to fill missing rows in
+
+    Returns:
+        (DataFrame): filled DataFrame
+    """
+    new_df = df.copy(deep=True)
+    try:
+        # Value used to fill new rows
+        fill_value = np.nan
+        # Fill missing rows in dataframe with NaN's
+        new_df = new_df.reindex(
+            pd.MultiIndex.from_product(new_df.index.levels),
+            fill_value=fill_value,
+        )
+        # Replace "NaN" with "None" in columns of string type
+        for col in new_df.columns:
+            if pd.api.types.is_string_dtype(new_df[col].dtype):
+                new_df[col] = new_df[col].replace({fill_value: None})
+    except ValueError as e:
+        estr = str(e)
+        if estr == "cannot handle a non-unique multi-index!":
+            warnings.warn(
+                "Non-unique multi-index for DataFrame in _fill_perfdata. Cannot Fill missing rows.",
+                RuntimeWarning,
+            )
+        else:
+            raise
+
+    return new_df

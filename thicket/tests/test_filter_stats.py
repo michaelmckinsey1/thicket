@@ -39,6 +39,9 @@ def check_filter_stats(th, columns_values):
             # We can't check th.graph because of squash in filter_stats
             assert th.statsframe.graph is not new_th.statsframe.graph
 
+            # Check Thicket and Statsframe graph in sync
+            assert len(new_th.graph) == len(new_th.statsframe.graph)
+
             # filtered nodes in aggregated statistics table
             stats_nodes = sorted(
                 new_th.statsframe.dataframe.index.drop_duplicates().tolist()
@@ -54,9 +57,14 @@ def check_filter_stats(th, columns_values):
             assert ensemble_nodes == exp_nodes
 
 
-def test_filter_stats(rajaperf_seq_O3_1M_cali):
+def test_filter_stats(rajaperf_seq_O3_1M_cali, intersection, fill_perfdata):
     # example thicket
-    th = Thicket.from_caliperreader(rajaperf_seq_O3_1M_cali, disable_tqdm=True)
+    th = Thicket.from_caliperreader(
+        rajaperf_seq_O3_1M_cali,
+        intersection=intersection,
+        fill_perfdata=fill_perfdata,
+        disable_tqdm=True,
+    )
     # columns and corresponding values to filter by
     columns_values = {
         "test_string_column": ["less than 20"],
