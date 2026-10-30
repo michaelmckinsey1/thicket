@@ -590,15 +590,17 @@ class Thicket(GraphFrame):
         """Read in a single Caliper .cali file that has timeseries records
         gets split into a list of graphframes by hatchet.
 
+        Nodes without an observation in a time step have NaN metric values.
+
         Arguments:
-            filename_or_stream (str or file-like): name of a Caliper timeseries output file in
-                `.cali` format, or an open file object to read one
+            filename_or_caliperreader (str or CaliperReader): name of a Caliper
+                timeseries output file in `.cali` format, or a CaliperReader object
             level (str): level to split the timeseries, default "loop.start_iteration"
             intersection (bool): whether to perform intersection or union (default)
         """
         # if we are reading a timeseries file we will expect a list back from the reader
         ens_list = []
-        gf_list = GraphFrame.from_timeseries(filename_or_caliperreader)
+        gf_list = GraphFrame.from_timeseries(filename_or_caliperreader, level=level)
         for gf in gf_list:
             ens_list.append(Thicket.thicketize_timeseries_graphframe(gf, level))
 
